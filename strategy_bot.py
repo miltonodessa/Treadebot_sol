@@ -499,8 +499,7 @@ async def watch_target(session: aiohttp.ClientSession):
         try:
             async with websockets.connect(
                 config.WSS_URL,
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=None,
             ) as ws:
 
                 sub = {
