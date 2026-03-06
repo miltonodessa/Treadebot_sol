@@ -34,6 +34,35 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
+
+# ─── Кликабельные ссылки (ANSI OSC 8) ────────────────────────────────────────
+# Работают в iTerm2, Kitty, WezTerm, VS Code terminal, Windows Terminal
+
+def _link(url: str, text: str) -> str:
+    """Оборачивает text в кликабельную ANSI-ссылку."""
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
+def tx_link(sig: str) -> str:
+    """Кликабельная ссылка на транзакцию в GMGN."""
+    if sig.startswith("DRY_"):
+        return f"[DRY:{sig[4:18]}]"
+    short = sig[:16] + "…"
+    return _link(f"https://gmgn.ai/sol/tx/{sig}", short)
+
+
+def token_link(mint: str) -> str:
+    """Кликабельная ссылка на токен в GMGN."""
+    short = mint[:8] + "…"
+    return _link(f"https://gmgn.ai/sol/token/{mint}", short)
+
+
+def solscan_tx(sig: str) -> str:
+    """Дополнительная ссылка на Solscan."""
+    if sig.startswith("DRY_"):
+        return ""
+    return _link(f"https://solscan.io/tx/{sig}", "solscan")
+
 # ─── Режим работы ─────────────────────────────────────────────────────────────
 
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
@@ -371,15 +400,9 @@ async def open_position(mint: str, signal: str, session: aiohttp.ClientSession):
 
     entry_price = BUY_SIZE_SOL / (out_amount / 1e6)
 
-    tag = "🟡 [DRY]" if DRY_RUN else "🟢 [LIVE]"
-    log.info(
-        "%s ВХОД  %s | сигнал: %s | %.3f SOL | цена: %.8f",
-        tag, mint[:16], signal, BUY_SIZE_SOL, entry_price,
-    )
-
     sig = await jup_swap(SOL_MINT, mint, lamports, session)
     if not sig:
-        log.warning("Не удалось войти в %s", mint[:8])
+        log.warning("Не удалось войти в %s", token_link(mint))
         return
 
     state.last_entry[mint] = time.time()
@@ -387,6 +410,13 @@ async def open_position(mint: str, signal: str, session: aiohttp.ClientSession):
 
     if DRY_RUN:
         state.virtual_sol_balance -= BUY_SIZE_SOL
+
+    tag = "🟡 [DRY]" if DRY_RUN else "🟢 [LIVE]"
+    log.info(
+        "%s ВХОД  %s | сигнал: %s | %.3f SOL | цена: %.8f | %s  %s",
+        tag, token_link(mint), signal, BUY_SIZE_SOL, entry_price,
+        tx_link(sig), solscan_tx(sig),
+    )
 
     state.positions[mint] = Position(
         mint=mint,
@@ -426,8 +456,9 @@ async def sell_chunk(
     pos.token_balance -= to_sell
     tag = "🟡 [DRY]" if DRY_RUN else "🟢 [LIVE]"
     log.info(
-        "%s ПРОДАЖА  %s | %s | %.0f%% позиции | цена %+.1f%% | sig: %s",
-        tag, pos.mint[:16], reason, fraction * 100, price_change * 100, sig[:16],
+        "%s ПРОДАЖА %s | %s | %.0f%% позиции | цена %+.1f%% | %s  %s",
+        tag, token_link(pos.mint), reason, fraction * 100, price_change * 100,
+        tx_link(sig), solscan_tx(sig),
     )
     return True
 
@@ -457,11 +488,15 @@ async def close_all(
 
     held = time.time() - pos.open_ts
     pnl  = pos.simulated_return_sol - pos.buy_sol if DRY_RUN else 0.0
+    pnl_icon = "✅" if pnl >= 0 else "❌"
 
     tag = "🟡 [DRY]" if DRY_RUN else "🟢 [LIVE]"
     log.info(
-        "%s ЗАКРЫТА %s | %s | удержание: %.0fs | PnL: %+.4f SOL | sig: %s",
-        tag, pos.mint[:16], reason, held, pnl, sig[:16] if sig else "ERR",
+        "%s ЗАКРЫТА %s | %s | удержание: %.0fs | PnL: %s %+.4f SOL | %s  %s",
+        tag, token_link(pos.mint), reason, held,
+        pnl_icon, pnl,
+        tx_link(sig) if sig else "[no sig]",
+        solscan_tx(sig) if sig else "",
     )
 
     if DRY_RUN:
@@ -482,7 +517,7 @@ async def position_manager(session: aiohttp.ClientSession):
 
             # Emergency exit
             if held > EMERGENCY_SECS:
-                log.warning("⚠️  Emergency exit %s (%.0fs)", mint[:8], held)
+                log.warning("⚠️  Emergency exit %s (%.0fs)", token_link(mint), held)
                 pc = await get_price_change(pos, session) or 0.0
                 await close_all(pos, "emergency", pc, session)
                 continue
@@ -502,13 +537,13 @@ async def position_manager(session: aiohttp.ClientSession):
 
             # Stop-loss
             if pc <= -STOP_LOSS_PCT:
-                log.warning("🛑 Stop-loss %s | %+.1f%%", mint[:8], pc * 100)
+                log.warning("🛑 Stop-loss %s | %+.1f%%", token_link(mint), pc * 100)
                 await close_all(pos, f"stop-loss {pc*100:.0f}%", pc, session)
                 continue
 
             # Time-stop (чанк 3 не дождался цели)
             if held > TIME_STOP_SECS and not pos.exit_done[-1]:
-                log.info("⏰ Time-stop %s | %+.1f%%", mint[:8], pc * 100)
+                log.info("⏰ Time-stop %s | %+.1f%%", token_link(mint), pc * 100)
                 await close_all(pos, "time-stop", pc, session)
                 continue
 
@@ -646,8 +681,8 @@ async def status_logger(session: aiohttp.ClientSession):
             for m, p in state.positions.items():
                 held = time.time() - p.open_ts
                 log.info(
-                    "     %s | удержание %.0fs | баланс %d tok",
-                    m[:24], held, p.token_balance,
+                    "     %s | удержание %.0fs | %.3f SOL вход",
+                    token_link(m), held, p.buy_sol,
                 )
         log.info("─" * 65)
 
