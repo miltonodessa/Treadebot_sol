@@ -598,7 +598,7 @@ async def watch_program(program_id: str, session: aiohttp.ClientSession):
     while True:
         try:
             async with websockets.connect(
-                config.WSS_URL, ping_interval=20, ping_timeout=10, ssl=_ssl_ctx
+                config.WSS_URL, ping_interval=None, ssl=_ssl_ctx
             ) as ws:
                 await ws.send(json.dumps({
                     "jsonrpc": "2.0", "id": 1,
