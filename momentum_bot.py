@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import ssl
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -587,12 +588,17 @@ def parse_buy(tx: dict) -> Optional[tuple[str, float, str]]:
 
 # ─── WebSocket listener ───────────────────────────────────────────────────────
 
+_ssl_ctx = ssl.create_default_context()
+_ssl_ctx.check_hostname = False
+_ssl_ctx.verify_mode = ssl.CERT_NONE
+
+
 async def watch_program(program_id: str, session: aiohttp.ClientSession):
     label = program_id[:16]
     while True:
         try:
             async with websockets.connect(
-                config.WSS_URL, ping_interval=20, ping_timeout=10
+                config.WSS_URL, ping_interval=20, ping_timeout=10, ssl=_ssl_ctx
             ) as ws:
                 await ws.send(json.dumps({
                     "jsonrpc": "2.0", "id": 1,
