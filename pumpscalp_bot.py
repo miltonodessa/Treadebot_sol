@@ -51,12 +51,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import csv
 import aiohttp
 import websockets
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 import config
+
+# ─── Файл для сохранения истории сделок ───────────────────────────────────────
+_SESSION_START  = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+TRADES_CSV_PATH = os.getenv("TRADES_CSV_PATH", f"trades_{_SESSION_START}.csv")
+TRADES_JSON_PATH = TRADES_CSV_PATH.replace(".csv", "_summary.json")
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -165,6 +171,7 @@ class Position:
 
     # P&L накопленный по частичным продажам
     realized_sol:  float = 0.0
+    exit_reason:   str   = ""    # причина закрытия для лога
 
 
 @dataclass
@@ -175,6 +182,35 @@ class MintHistory:
     total_reentries: int   = 0
     total_pnl:       float = 0.0
     first_seen:      float = 0.0
+
+
+@dataclass
+class TradeRecord:
+    """Запись о закрытой сделке — сохраняется в CSV/JSON для анализа."""
+    # Идентификация
+    mint:         str
+    symbol:       str
+    gmgn_url:     str
+
+    # Время
+    opened_at:    str    # ISO UTC
+    closed_at:    str    # ISO UTC
+    hold_sec:     float
+
+    # Деньги
+    entry_sol:    float
+    exit_sol:     float
+    pnl_sol:      float
+    pnl_pct:      float
+
+    # Контекст
+    exit_reason:  str
+    is_reentry:   bool
+    reentry_num:  int    # 0 = первичный вход
+
+    # Фазы (прошёл ли T+8s и T+30s check)
+    passed_quick_stop: bool
+    passed_momentum:   bool
 
 
 class BotState:
@@ -192,6 +228,9 @@ class BotState:
         self.signals_received: int  = 0
         self.signals_entered:  int  = 0
         self.reentries:        int  = 0
+
+        # История сделок для экспорта
+        self.trade_log:   list[TradeRecord] = []
 
     @property
     def win_rate(self) -> float:
@@ -507,11 +546,12 @@ async def close_position(
 
 
 def _record_closed(pos: Position, final_price: float):
-    """Записать закрытую сделку в статистику."""
+    """Записать закрытую сделку в статистику и trade_log."""
+    now = time.time()
     total_sol_out = pos.realized_sol
-    net_pnl = total_sol_out - pos.entry_sol
-    hold_min = (time.time() - pos.opened_at) / 60
-    ret_pct = net_pnl / pos.entry_sol * 100 if pos.entry_sol > 0 else 0
+    net_pnl  = total_sol_out - pos.entry_sol
+    hold_sec = now - pos.opened_at
+    ret_pct  = net_pnl / pos.entry_sol * 100 if pos.entry_sol > 0 else 0
 
     state.session_trades += 1
     state.session_pnl    += net_pnl
@@ -521,12 +561,31 @@ def _record_closed(pos: Position, final_price: float):
 
     icon = "✅" if net_pnl > 0 else "❌"
     log.info("%s %-10s  PnL %+.4f SOL (%+.1f%%)  hold %.1f мин  WR %.0f%%\n         %s",
-             icon, pos.symbol, net_pnl, ret_pct, hold_min, state.win_rate,
+             icon, pos.symbol, net_pnl, ret_pct, hold_sec / 60, state.win_rate,
              gmgn(pos.mint))
+
+    # Запись в trade_log
+    state.trade_log.append(TradeRecord(
+        mint=pos.mint,
+        symbol=pos.symbol,
+        gmgn_url=gmgn(pos.mint),
+        opened_at=datetime.fromtimestamp(pos.opened_at, tz=timezone.utc).isoformat(),
+        closed_at=datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        hold_sec=round(hold_sec, 1),
+        entry_sol=round(pos.entry_sol, 6),
+        exit_sol=round(total_sol_out, 6),
+        pnl_sol=round(net_pnl, 6),
+        pnl_pct=round(ret_pct, 2),
+        exit_reason=pos.exit_reason,
+        is_reentry=pos.is_reentry,
+        reentry_num=pos.reentry_count,
+        passed_quick_stop=pos.quick_stop_done,
+        passed_momentum=pos.momentum_done,
+    ))
 
     # Обновить историю минта для re-entry логики
     h = state.mint_history[pos.mint]
-    h.last_exit_time  = time.time()
+    h.last_exit_time  = now
     h.last_exit_price = final_price
     h.total_pnl      += net_pnl
     h.total_reentries = pos.reentry_count
@@ -565,41 +624,40 @@ async def manage_positions(session: aiohttp.ClientSession):
         # Выходит НЕМЕДЛЕННО если нет признаков роста
         if not pos.quick_stop_done:
             if age_sec < QUICK_STOP_SEC:
-                # Только экстренный выход если сразу -5%
                 if pnl_pct <= -SL_IMMEDIATE_PCT:
-                    await close_position(pos, 1.0, f"IMMEDIATE_SL {pnl_pct:+.1%}", price, session)
+                    reason = f"IMMEDIATE_SL {pnl_pct:+.1%}"
+                    await close_position(pos, 1.0, reason, price, session)
+                    pos.exit_reason = reason
                     to_remove.append(mint)
                     _record_closed(pos, price)
                 continue
 
-            # T+8s достигнут
             pos.quick_stop_done = True
             if pnl_pct <= QUICK_STOP_MIN_PCT:
-                # Нет роста за 8 секунд → выходим (основная масса убыточных сделок)
-                await close_position(pos, 1.0, f"QUICK_STOP_8s {pnl_pct:+.1%}", price, session)
+                reason = f"QUICK_STOP_8s {pnl_pct:+.1%}"
+                await close_position(pos, 1.0, reason, price, session)
+                pos.exit_reason = reason
                 to_remove.append(mint)
                 _record_closed(pos, price)
                 continue
             else:
                 log.debug("⚡ T+8s %-10s %+.1f%% → держим", pos.symbol, pnl_pct * 100)
 
-        # ─── ФАЗА 2: T+8s до T+30s (MOMENTUM GATE) ───────────────────────
-        # Из данных: второй пик выходов 25-30s (539 выходов!)
-        # Обязательная продажа если нет momentum к T+30s
         if not pos.momentum_done:
             if age_sec < MOMENTUM_GATE_SEC:
-                # Защитный стоп в этой фазе: -5%
                 if pnl_pct <= -SL_IMMEDIATE_PCT:
-                    await close_position(pos, 1.0, f"EARLY_SL {pnl_pct:+.1%}", price, session)
+                    reason = f"EARLY_SL {pnl_pct:+.1%}"
+                    await close_position(pos, 1.0, reason, price, session)
+                    pos.exit_reason = reason
                     to_remove.append(mint)
                     _record_closed(pos, price)
                 continue
 
-            # T+30s достигнут
             pos.momentum_done = True
             if pnl_pct < MOMENTUM_MIN_PCT:
-                # Нет momentum → обязательный выход
-                await close_position(pos, 1.0, f"MOMENTUM_GATE_30s {pnl_pct:+.1%}", price, session)
+                reason = f"MOMENTUM_GATE_30s {pnl_pct:+.1%}"
+                await close_position(pos, 1.0, reason, price, session)
+                pos.exit_reason = reason
                 to_remove.append(mint)
                 _record_closed(pos, price)
                 continue
@@ -607,11 +665,7 @@ async def manage_positions(session: aiohttp.ClientSession):
                 log.info("✅ T+30s %-10s %+.1f%% — MOMENTUM! Держим 🏃\n         %s",
                          pos.symbol, pnl_pct * 100, gmgn(pos.mint))
 
-        # ─── ФАЗА 3: АКТИВНАЯ ПОЗИЦИЯ (momentum подтверждён) ─────────────
-        # Из данных: WR 54% для 60-300s, avg PnL +0.16 SOL
-        # WR 50% для 300s+, avg PnL +1.15 SOL (FAT TAIL!)
-
-        # Обновляем trailing stop
+        # ─── ФАЗА 3: АКТИВНАЯ ПОЗИЦИЯ ─────────────────────────────────────
         if pnl_pct >= TRAILING_TRIGGER_PCT:
             new_trail = pos.peak_price * (1 - TRAILING_DISTANCE)
             if pos.trailing_sl is None or new_trail > pos.trailing_sl:
@@ -619,44 +673,42 @@ async def manage_positions(session: aiohttp.ClientSession):
                     log.info("⚡ Trailing SL активирован: %-10s @%.2e", pos.symbol, new_trail)
                 pos.trailing_sl = new_trail
 
-        # Trailing stop hit
         if pos.trailing_sl and price <= pos.trailing_sl:
-            await close_position(pos, 1.0, f"TRAILING_SL {pnl_pct:+.1%}", price, session)
+            reason = f"TRAILING_SL {pnl_pct:+.1%}"
+            await close_position(pos, 1.0, reason, price, session)
+            pos.exit_reason = reason
             to_remove.append(mint)
             _record_closed(pos, price)
             continue
 
-        # Hard stop -8% в активной фазе
         if pnl_pct <= -0.08:
-            await close_position(pos, 1.0, f"HARD_SL {pnl_pct:+.1%}", price, session)
+            reason = f"HARD_SL {pnl_pct:+.1%}"
+            await close_position(pos, 1.0, reason, price, session)
+            pos.exit_reason = reason
             to_remove.append(mint)
             _record_closed(pos, price)
             continue
 
-        # Time stop: 15 мин (из данных: WR резко падает после 15 мин)
         if age_sec >= HARD_TIME_STOP_MIN * 60:
-            await close_position(pos, 1.0, f"TIME_15min {pnl_pct:+.1%}", price, session)
+            reason = f"TIME_15min {pnl_pct:+.1%}"
+            await close_position(pos, 1.0, reason, price, session)
+            pos.exit_reason = reason
             to_remove.append(mint)
             _record_closed(pos, price)
             continue
 
-        # TP3: +200% → продать 75% (лунный выход)
         if not pos.tp3_done and pos.tp2_done and pnl_pct >= TP3_PCT:
             await close_position(pos, TP3_SELL_FRAC, f"TP3 +{TP3_PCT:.0%}", price, session)
             pos.tp3_done = True
-
-        # TP2: +60% → продать 50% от остатка
         elif not pos.tp2_done and pos.tp1_done and pnl_pct >= TP2_PCT:
             await close_position(pos, TP2_SELL_FRAC, f"TP2 +{TP2_PCT:.0%}", price, session)
             pos.tp2_done = True
-
-        # TP1: +20% → продать 50%
         elif not pos.tp1_done and pnl_pct >= TP1_PCT:
             await close_position(pos, TP1_SELL_FRAC, f"TP1 +{TP1_PCT:.0%}", price, session)
             pos.tp1_done = True
 
-        # Если продали всё через частичные TP
         if pos.token_balance <= 0:
+            pos.exit_reason = "ALL_TP"
             to_remove.append(mint)
             _record_closed(pos, price)
 
@@ -946,6 +998,118 @@ async def status_logger():
         log.info("═" * 65)
 
 
+def save_trade_log():
+    """
+    Сохранить историю сделок в CSV + JSON-summary.
+    CSV — строка на сделку, удобно скормить в анализатор.
+    JSON — агрегаты по exit_reason, hold, WR.
+    """
+    trades = state.trade_log
+    if not trades:
+        return
+
+    # ── CSV ───────────────────────────────────────────────────────────────────
+    fields = [
+        "opened_at", "closed_at", "hold_sec",
+        "symbol", "mint", "gmgn_url",
+        "entry_sol", "exit_sol", "pnl_sol", "pnl_pct",
+        "exit_reason", "is_reentry", "reentry_num",
+        "passed_quick_stop", "passed_momentum",
+    ]
+    with open(TRADES_CSV_PATH, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for t in trades:
+            w.writerow({
+                "opened_at":         t.opened_at,
+                "closed_at":         t.closed_at,
+                "hold_sec":          t.hold_sec,
+                "symbol":            t.symbol,
+                "mint":              t.mint,
+                "gmgn_url":          t.gmgn_url,
+                "entry_sol":         t.entry_sol,
+                "exit_sol":          t.exit_sol,
+                "pnl_sol":           t.pnl_sol,
+                "pnl_pct":           t.pnl_pct,
+                "exit_reason":       t.exit_reason,
+                "is_reentry":        t.is_reentry,
+                "reentry_num":       t.reentry_num,
+                "passed_quick_stop": t.passed_quick_stop,
+                "passed_momentum":   t.passed_momentum,
+            })
+
+    # ── JSON summary ──────────────────────────────────────────────────────────
+    from collections import defaultdict as _dd
+    import dataclasses
+
+    wins  = [t for t in trades if t.pnl_sol > 0]
+    loses = [t for t in trades if t.pnl_sol <= 0]
+
+    by_reason: dict = _dd(lambda: {"count": 0, "pnl": 0.0, "wins": 0})
+    by_phase:  dict = {
+        "quick_stop_phase":  {"count": 0, "pnl": 0.0, "wins": 0},
+        "momentum_phase":    {"count": 0, "pnl": 0.0, "wins": 0},
+        "active_phase":      {"count": 0, "pnl": 0.0, "wins": 0},
+    }
+    for t in trades:
+        r = t.exit_reason.split()[0] if t.exit_reason else "UNKNOWN"
+        by_reason[r]["count"] += 1
+        by_reason[r]["pnl"]   += t.pnl_sol
+        by_reason[r]["wins"]  += int(t.pnl_sol > 0)
+
+        if not t.passed_quick_stop:
+            phase = "quick_stop_phase"
+        elif not t.passed_momentum:
+            phase = "momentum_phase"
+        else:
+            phase = "active_phase"
+        by_phase[phase]["count"] += 1
+        by_phase[phase]["pnl"]   += t.pnl_sol
+        by_phase[phase]["wins"]  += int(t.pnl_sol > 0)
+
+    def _wr(d):
+        return round(d["wins"] / d["count"] * 100, 1) if d["count"] else 0
+
+    summary = {
+        "session_start":   _SESSION_START,
+        "trades_total":    len(trades),
+        "win_rate_pct":    round(len(wins) / len(trades) * 100, 1) if trades else 0,
+        "pnl_total_sol":   round(sum(t.pnl_sol for t in trades), 4),
+        "avg_pnl_sol":     round(sum(t.pnl_sol for t in trades) / len(trades), 4) if trades else 0,
+        "avg_win_sol":     round(sum(t.pnl_sol for t in wins) / len(wins), 4) if wins else 0,
+        "avg_loss_sol":    round(sum(t.pnl_sol for t in loses) / len(loses), 4) if loses else 0,
+        "avg_hold_sec":    round(sum(t.hold_sec for t in trades) / len(trades), 1) if trades else 0,
+        "reentries":       sum(1 for t in trades if t.is_reentry),
+        "by_exit_reason":  {k: {**v, "wr_pct": _wr(v)} for k, v in sorted(by_reason.items())},
+        "by_phase":        {k: {**v, "wr_pct": _wr(v)} for k, v in by_phase.items()},
+        "top10_wins":      [
+            {"symbol": t.symbol, "pnl_sol": t.pnl_sol, "pnl_pct": t.pnl_pct,
+             "hold_sec": t.hold_sec, "reason": t.exit_reason, "url": t.gmgn_url}
+            for t in sorted(trades, key=lambda x: x.pnl_sol, reverse=True)[:10]
+        ],
+        "top10_losses":    [
+            {"symbol": t.symbol, "pnl_sol": t.pnl_sol, "pnl_pct": t.pnl_pct,
+             "hold_sec": t.hold_sec, "reason": t.exit_reason, "url": t.gmgn_url}
+            for t in sorted(trades, key=lambda x: x.pnl_sol)[:10]
+        ],
+    }
+    with open(TRADES_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+
+    log.info("💾 Сохранено %d сделок → %s  |  summary → %s",
+             len(trades), TRADES_CSV_PATH, TRADES_JSON_PATH)
+
+
+async def autosave_loop():
+    """Автосохранение CSV каждые 5 минут."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            save_trade_log()
+        except Exception as e:
+            log.debug("autosave error: %s", e)
+
+
 async def daily_reset():
     """Сброс дневной статистики в полночь UTC."""
     while True:
@@ -996,6 +1160,7 @@ async def main():
             reentry_monitor(session),
             status_logger(),
             daily_reset(),
+            autosave_loop(),
         )
 
 
@@ -1006,3 +1171,4 @@ if __name__ == "__main__":
         log.info("Остановлено.")
         log.info("Итого: %d сделок  |  WR %.1f%%  |  PnL %+.4f SOL",
                  state.session_trades, state.win_rate, state.session_pnl)
+        save_trade_log()
