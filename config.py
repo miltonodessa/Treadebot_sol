@@ -1,11 +1,9 @@
 """
 Bot configuration. Copy .env.example to .env and fill in your values.
 
-Параметры настроены под стратегию 2TE2F:
-- Торгует только 15-23h UTC
-- Размеры: 2/3/5 SOL (scale фактором от этих размеров)
-- Медианное удержание: 20 секунд (emergency exit через 5 мин)
-- Частичные продажи вслед за мастером
+Поддерживаются два бота:
+- pumpscalp_bot.py  — PUMPSCALP v1.0 (рекомендуется)
+- strategy_bot.py   — copy-trading 2TE2F
 """
 import os
 from dotenv import load_dotenv
@@ -14,6 +12,7 @@ load_dotenv()
 
 # ── RPC ────────────────────────────────────────────────────────────────────────
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
+BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "")
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 WSS_URL = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
