@@ -118,6 +118,11 @@ PUMPPORTAL_TRADE  = "https://pumpportal.fun/api/trade-local"
 WSOL_MINT         = "So11111111111111111111111111111111111111112"
 PUMPFUN_PROGRAM   = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
+
+def gmgn(mint: str) -> str:
+    """Ссылка на токен в GMGN для быстрого анализа."""
+    return f"https://gmgn.ai/sol/token/{mint}"
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # СТРУКТУРЫ ДАННЫХ
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -406,8 +411,9 @@ async def open_position(
         tokens_received = int(buy_sol / cached_price) if cached_price > 0 else int(buy_sol * 1e6)
         entry_price = buy_sol / max(tokens_received, 1)
         state.bank -= buy_sol
-        log.info("🟡 [DRY] %s  %-10s  %.3f SOL  %d tokens  @%.2e SOL/token",
-                 entry_label, event.symbol, buy_sol, tokens_received, entry_price)
+        log.info("🟡 [DRY] %s  %-10s  %.3f SOL  %d tokens  @%.2e SOL/token\n         %s",
+                 entry_label, event.symbol, buy_sol, tokens_received, entry_price,
+                 gmgn(event.mint))
     else:
         data = await pumpportal_buy(event.mint, buy_sol, session)
         if data is None:
@@ -429,7 +435,8 @@ async def open_position(
             tokens_received = int(buy_sol * 1e6)   # грубая оценка
 
         entry_price = buy_sol / max(tokens_received, 1)
-        log.info("🟢 %s  %-10s  %.3f SOL  %.8s", entry_label, event.symbol, buy_sol, sig)
+        log.info("🟢 %s  %-10s  %.3f SOL  %.8s\n         %s",
+                 entry_label, event.symbol, buy_sol, sig, gmgn(event.mint))
 
     now = time.time()
     return Position(
@@ -466,8 +473,9 @@ async def close_position(
 
     if DRY_RUN:
         icon = "🟢" if pnl >= 0 else "🔴"
-        log.info("%s [DRY] SELL %-10s  %d%%  %+.4f SOL (%+.1f%%)  [%s]",
-                 icon, pos.symbol, int(fraction * 100), pnl, pnl_pct, reason)
+        log.info("%s [DRY] SELL %-10s  %d%%  %+.4f SOL (%+.1f%%)  [%s]\n         %s",
+                 icon, pos.symbol, int(fraction * 100), pnl, pnl_pct, reason,
+                 gmgn(pos.mint))
     else:
         data = await pumpportal_sell(pos.mint, to_sell, session)
         if data is None:
@@ -486,8 +494,9 @@ async def close_position(
         sol_value = int(data.get("outAmount") or data.get("solReceived") or sol_value * 1e9) / 1e9
         pnl = sol_value - pos.entry_sol * fraction
         icon = "🟢" if pnl >= 0 else "🔴"
-        log.info("%s SELL %-10s  %d%%  %+.4f SOL (%+.1f%%)  [%s]  %.8s",
-                 icon, pos.symbol, int(fraction * 100), pnl, pnl_pct, reason, sig)
+        log.info("%s SELL %-10s  %d%%  %+.4f SOL (%+.1f%%)  [%s]  %.8s\n         %s",
+                 icon, pos.symbol, int(fraction * 100), pnl, pnl_pct, reason, sig,
+                 gmgn(pos.mint))
 
     pos.token_balance -= to_sell
     pos.realized_sol  += sol_value
@@ -511,8 +520,9 @@ def _record_closed(pos: Position, final_price: float):
         state.session_wins += 1
 
     icon = "✅" if net_pnl > 0 else "❌"
-    log.info("%s %-10s  PnL %+.4f SOL (%+.1f%%)  hold %.1f мин  WR %.0f%%",
-             icon, pos.symbol, net_pnl, ret_pct, hold_min, state.win_rate)
+    log.info("%s %-10s  PnL %+.4f SOL (%+.1f%%)  hold %.1f мин  WR %.0f%%\n         %s",
+             icon, pos.symbol, net_pnl, ret_pct, hold_min, state.win_rate,
+             gmgn(pos.mint))
 
     # Обновить историю минта для re-entry логики
     h = state.mint_history[pos.mint]
@@ -594,8 +604,8 @@ async def manage_positions(session: aiohttp.ClientSession):
                 _record_closed(pos, price)
                 continue
             else:
-                log.info("✅ T+30s %-10s %+.1f%% — MOMENTUM! Держим 🏃",
-                         pos.symbol, pnl_pct * 100)
+                log.info("✅ T+30s %-10s %+.1f%% — MOMENTUM! Держим 🏃\n         %s",
+                         pos.symbol, pnl_pct * 100, gmgn(pos.mint))
 
         # ─── ФАЗА 3: АКТИВНАЯ ПОЗИЦИЯ (momentum подтверждён) ─────────────
         # Из данных: WR 54% для 60-300s, avg PnL +0.16 SOL
@@ -705,8 +715,9 @@ async def check_reentries(session: aiohttp.ClientSession):
                 break
 
         reentry_size = BUY_SIZE_REENTRY_SOL  # чуть больше базового
-        log.info("🔄 RE-ENTRY  %s  #%d  %.2f SOL  (%.0fs после выхода)",
-                 mint[:12], history.total_reentries + 1, reentry_size, time_since_exit)
+        log.info("🔄 RE-ENTRY  %-10s  #%d  %.2f SOL  (%.0fs после выхода)\n         %s",
+                 mint[:12], history.total_reentries + 1, reentry_size, time_since_exit,
+                 gmgn(mint))
 
         pos = await open_position(event, reentry_size, is_reentry=True,
                                   reentry_count=history.total_reentries + 1,
