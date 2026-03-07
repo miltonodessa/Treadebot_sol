@@ -78,6 +78,9 @@ log = logging.getLogger("pumpscalp")
 DRY_RUN              = os.getenv("DRY_RUN", "true").lower() == "true"
 VIRTUAL_BALANCE_SOL  = float(os.getenv("VIRTUAL_BALANCE_SOL", "50.0"))
 
+# ── Pump.fun: фиксированный total supply ────────────────────────────────────
+PUMP_TOTAL_SUPPLY    = 1_000_000_000   # 1B токенов у всех pump.fun монет
+
 # ── Размер позиции (медиана из данных: 0.265 SOL) ───────────────────────────
 BUY_SIZE_SOL         = float(os.getenv("BUY_SIZE_SOL", "0.25"))
 BUY_SIZE_REENTRY_SOL = float(os.getenv("BUY_SIZE_REENTRY_SOL", "0.30"))  # чуть крупнее при re-entry
@@ -173,6 +176,9 @@ class Position:
     realized_sol:  float = 0.0
     exit_reason:   str   = ""    # причина закрытия для лога
 
+    # Капитализация при входе (SOL = price × 1B)
+    entry_mcap_sol: float = 0.0
+
 
 @dataclass
 class MintHistory:
@@ -198,10 +204,14 @@ class TradeRecord:
     hold_sec:     float
 
     # Деньги
-    entry_sol:    float
-    exit_sol:     float
-    pnl_sol:      float
-    pnl_pct:      float
+    entry_sol:      float
+    exit_sol:       float
+    pnl_sol:        float
+    pnl_pct:        float
+
+    # Капитализация (SOL = price × 1B tokens)
+    entry_mcap_sol: float
+    exit_mcap_sol:  float
 
     # Контекст
     exit_reason:  str
@@ -488,6 +498,7 @@ async def open_position(
         is_reentry=is_reentry,
         reentry_count=reentry_count,
         peak_price=entry_price,
+        entry_mcap_sol=round(entry_price * PUMP_TOTAL_SUPPLY, 4),
     )
 
 
@@ -559,10 +570,14 @@ def _record_closed(pos: Position, final_price: float):
     if net_pnl > 0:
         state.session_wins += 1
 
+    exit_mcap_sol = round(final_price * PUMP_TOTAL_SUPPLY, 4) if final_price else 0.0
+
     icon = "✅" if net_pnl > 0 else "❌"
-    log.info("%s %-10s  PnL %+.4f SOL (%+.1f%%)  hold %.1f мин  WR %.0f%%\n         %s",
+    log.info("%s %-10s  PnL %+.4f SOL (%+.1f%%)  hold %.1f мин  WR %.0f%%\n"
+             "         mcap: вход %.1f SOL → выход %.1f SOL\n"
+             "         %s",
              icon, pos.symbol, net_pnl, ret_pct, hold_sec / 60, state.win_rate,
-             gmgn(pos.mint))
+             pos.entry_mcap_sol, exit_mcap_sol, gmgn(pos.mint))
 
     # Запись в trade_log
     state.trade_log.append(TradeRecord(
@@ -576,6 +591,8 @@ def _record_closed(pos: Position, final_price: float):
         exit_sol=round(total_sol_out, 6),
         pnl_sol=round(net_pnl, 6),
         pnl_pct=round(ret_pct, 2),
+        entry_mcap_sol=pos.entry_mcap_sol,
+        exit_mcap_sol=exit_mcap_sol,
         exit_reason=pos.exit_reason,
         is_reentry=pos.is_reentry,
         reentry_num=pos.reentry_count,
@@ -1013,6 +1030,7 @@ def save_trade_log():
         "opened_at", "closed_at", "hold_sec",
         "symbol", "mint", "gmgn_url",
         "entry_sol", "exit_sol", "pnl_sol", "pnl_pct",
+        "entry_mcap_sol", "exit_mcap_sol",
         "exit_reason", "is_reentry", "reentry_num",
         "passed_quick_stop", "passed_momentum",
     ]
@@ -1031,6 +1049,8 @@ def save_trade_log():
                 "exit_sol":          t.exit_sol,
                 "pnl_sol":           t.pnl_sol,
                 "pnl_pct":           t.pnl_pct,
+                "entry_mcap_sol":    t.entry_mcap_sol,
+                "exit_mcap_sol":     t.exit_mcap_sol,
                 "exit_reason":       t.exit_reason,
                 "is_reentry":        t.is_reentry,
                 "reentry_num":       t.reentry_num,
@@ -1070,6 +1090,20 @@ def save_trade_log():
     def _wr(d):
         return round(d["wins"] / d["count"] * 100, 1) if d["count"] else 0
 
+    # mcap buckets: <5 SOL / 5-20 / 20-100 / >100
+    def _mcap_bucket(sol: float) -> str:
+        if sol < 5:    return "<5_SOL"
+        if sol < 20:   return "5-20_SOL"
+        if sol < 100:  return "20-100_SOL"
+        return ">100_SOL"
+
+    by_mcap: dict = _dd(lambda: {"count": 0, "pnl": 0.0, "wins": 0})
+    for t in trades:
+        b = _mcap_bucket(t.entry_mcap_sol)
+        by_mcap[b]["count"] += 1
+        by_mcap[b]["pnl"]   += t.pnl_sol
+        by_mcap[b]["wins"]  += int(t.pnl_sol > 0)
+
     summary = {
         "session_start":   _SESSION_START,
         "trades_total":    len(trades),
@@ -1079,17 +1113,25 @@ def save_trade_log():
         "avg_win_sol":     round(sum(t.pnl_sol for t in wins) / len(wins), 4) if wins else 0,
         "avg_loss_sol":    round(sum(t.pnl_sol for t in loses) / len(loses), 4) if loses else 0,
         "avg_hold_sec":    round(sum(t.hold_sec for t in trades) / len(trades), 1) if trades else 0,
+        "avg_entry_mcap_sol": round(sum(t.entry_mcap_sol for t in trades) / len(trades), 2) if trades else 0,
+        "avg_exit_mcap_sol":  round(sum(t.exit_mcap_sol for t in trades) / len(trades), 2) if trades else 0,
         "reentries":       sum(1 for t in trades if t.is_reentry),
         "by_exit_reason":  {k: {**v, "wr_pct": _wr(v)} for k, v in sorted(by_reason.items())},
         "by_phase":        {k: {**v, "wr_pct": _wr(v)} for k, v in by_phase.items()},
+        "by_entry_mcap":   {k: {**v, "wr_pct": _wr(v)}
+                            for k, v in sorted(by_mcap.items())},
         "top10_wins":      [
             {"symbol": t.symbol, "pnl_sol": t.pnl_sol, "pnl_pct": t.pnl_pct,
-             "hold_sec": t.hold_sec, "reason": t.exit_reason, "url": t.gmgn_url}
+             "hold_sec": t.hold_sec, "reason": t.exit_reason,
+             "entry_mcap_sol": t.entry_mcap_sol, "exit_mcap_sol": t.exit_mcap_sol,
+             "url": t.gmgn_url}
             for t in sorted(trades, key=lambda x: x.pnl_sol, reverse=True)[:10]
         ],
         "top10_losses":    [
             {"symbol": t.symbol, "pnl_sol": t.pnl_sol, "pnl_pct": t.pnl_pct,
-             "hold_sec": t.hold_sec, "reason": t.exit_reason, "url": t.gmgn_url}
+             "hold_sec": t.hold_sec, "reason": t.exit_reason,
+             "entry_mcap_sol": t.entry_mcap_sol, "exit_mcap_sol": t.exit_mcap_sol,
+             "url": t.gmgn_url}
             for t in sorted(trades, key=lambda x: x.pnl_sol)[:10]
         ],
     }
