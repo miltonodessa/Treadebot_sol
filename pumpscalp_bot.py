@@ -74,6 +74,11 @@ _SESSION_START  = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 TRADES_CSV_PATH = os.getenv("TRADES_CSV_PATH", f"trades_{_SESSION_START}.csv")
 TRADES_JSON_PATH = TRADES_CSV_PATH.replace(".csv", "_summary.json")
 
+# ─── Накопительный мастер-лог (пополняется каждую сделку, не перезаписывается) ─
+MASTER_LOG     = os.getenv("MASTER_LOG", "trade_log_master.csv")
+# ─── ML-параметры от ночного тренера ──────────────────────────────────────────
+ML_PARAMS_FILE = os.getenv("ML_PARAMS_FILE", "ml_params.json")
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -152,6 +157,93 @@ PUMPFUN_PROGRAM   = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 def gmgn(mint: str) -> str:
     """Ссылка на токен в GMGN для быстрого анализа."""
     return f"https://gmgn.ai/sol/token/{mint}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ML: накопительный лог + загрузка параметров от ночного тренера
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MASTER_FIELDS = [
+    "opened_at", "closed_at", "hold_sec", "symbol", "mint",
+    "entry_sol", "exit_sol", "pnl_sol", "pnl_pct",
+    "entry_mcap_sol", "exit_mcap_sol", "exit_reason",
+    "is_reentry", "reentry_num", "passed_quick_stop", "passed_momentum",
+]
+
+
+def _append_master(t) -> None:
+    """Дозапись одной закрытой сделки в накопительный мастер-лог (append)."""
+    exists = os.path.exists(MASTER_LOG)
+    try:
+        with open(MASTER_LOG, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=_MASTER_FIELDS)
+            if not exists:
+                w.writeheader()
+            w.writerow({
+                "opened_at":         t.opened_at,
+                "closed_at":         t.closed_at,
+                "hold_sec":          t.hold_sec,
+                "symbol":            t.symbol,
+                "mint":              t.mint,
+                "entry_sol":         t.entry_sol,
+                "exit_sol":          t.exit_sol,
+                "pnl_sol":           t.pnl_sol,
+                "pnl_pct":           t.pnl_pct,
+                "entry_mcap_sol":    t.entry_mcap_sol,
+                "exit_mcap_sol":     t.exit_mcap_sol,
+                "exit_reason":       t.exit_reason,
+                "is_reentry":        t.is_reentry,
+                "reentry_num":       t.reentry_num,
+                "passed_quick_stop": t.passed_quick_stop,
+                "passed_momentum":   t.passed_momentum,
+            })
+    except Exception as e:
+        log.debug("master log append error: %s", e)
+
+
+def _load_ml_params() -> None:
+    """Загрузить параметры от ML-тренера (ml_params.json) и применить глобально."""
+    global QUICK_STOP_SEC, MOMENTUM_GATE_SEC, MOMENTUM_MIN_PCT, SL_PCT
+    global TP1_PCT, TP1_SELL_FRAC, TP2_PCT, TP2_SELL_FRAC, TRAILING_DISTANCE
+    global MIN_ENTRY_MCAP_SOL, MAX_ENTRY_MCAP_SOL, ML_ENTRY_FILTER_ENABLED
+
+    if not os.path.exists(ML_PARAMS_FILE):
+        return
+    try:
+        with open(ML_PARAMS_FILE, encoding="utf-8") as f:
+            p = json.load(f)
+        params = p.get("best_params", {})
+
+        if "quick_stop_sec"     in params: QUICK_STOP_SEC     = int(params["quick_stop_sec"])
+        if "momentum_gate_sec"  in params: MOMENTUM_GATE_SEC  = int(params["momentum_gate_sec"])
+        if "momentum_min_pct"   in params: MOMENTUM_MIN_PCT   = float(params["momentum_min_pct"])
+        if "sl_pct"             in params: SL_PCT             = float(params["sl_pct"])
+        if "tp1_pct"            in params: TP1_PCT            = float(params["tp1_pct"])
+        if "tp1_sell_frac"      in params: TP1_SELL_FRAC      = float(params["tp1_sell_frac"])
+        if "tp2_pct"            in params: TP2_PCT            = float(params["tp2_pct"])
+        if "tp2_sell_frac"      in params: TP2_SELL_FRAC      = float(params["tp2_sell_frac"])
+        if "trailing_distance"  in params: TRAILING_DISTANCE  = float(params["trailing_distance"])
+        if "min_entry_mcap_sol" in params: MIN_ENTRY_MCAP_SOL = float(params["min_entry_mcap_sol"])
+        if "max_entry_mcap_sol" in params: MAX_ENTRY_MCAP_SOL = float(params["max_entry_mcap_sol"])
+        if "entry_filter"       in params: ML_ENTRY_FILTER_ENABLED = bool(params["entry_filter"])
+
+        score  = p.get("score", 0)
+        ntrade = p.get("trades_used", 0)
+        log.info("✅ ML-параметры загружены из %s  score=%.4f  trades=%d",
+                 ML_PARAMS_FILE, score, ntrade)
+        log.info("   quick_stop=%ds  momentum_gate=%ds  sl=%.0f%%  tp1=%.0f%%  tp2=%.0f%%  "
+                 "mcap=[%.1f–%.1f]",
+                 QUICK_STOP_SEC, MOMENTUM_GATE_SEC, SL_PCT*100,
+                 TP1_PCT*100, TP2_PCT*100,
+                 MIN_ENTRY_MCAP_SOL, MAX_ENTRY_MCAP_SOL)
+    except Exception as e:
+        log.warning("⚠️  Не удалось загрузить ML-параметры: %s", e)
+
+
+# Фильтр по mcap (обновляется из ml_params.json)
+MIN_ENTRY_MCAP_SOL      = float(os.getenv("MIN_ENTRY_MCAP_SOL", "0.0"))
+MAX_ENTRY_MCAP_SOL      = float(os.getenv("MAX_ENTRY_MCAP_SOL", "9999.0"))
+ML_ENTRY_FILTER_ENABLED = False
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # СТРУКТУРЫ ДАННЫХ
@@ -621,6 +713,8 @@ def _record_closed(pos: Position, final_price: float):
         passed_quick_stop=pos.quick_stop_done,
         passed_momentum=pos.momentum_done,
     ))
+    # Сразу дозаписываем в накопительный мастер-лог (append, не перезапись)
+    _append_master(state.trade_log[-1])
 
     # Обновить историю минта для re-entry логики
     h = state.mint_history[pos.mint]
@@ -1194,6 +1288,9 @@ async def daily_reset():
 
 async def main():
     global _keypair
+
+    # Загружаем ML-параметры от ночного тренера (если есть)
+    _load_ml_params()
 
     log.info("═" * 65)
     log.info("  PUMPSCALP v4.0  —  Pump.fun Direct Bonding Curve Sniper")
