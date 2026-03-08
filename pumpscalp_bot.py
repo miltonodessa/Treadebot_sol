@@ -112,7 +112,18 @@ TP1_SELL_FRAC        = float(os.getenv("TP1_SELL_FRAC", "0.50"))
 # TP2: +50% → продать ещё 35% (оставляем 15% как lottery ticket)
 TP2_PCT              = float(os.getenv("TP2_PCT", "0.50"))
 TP2_SELL_FRAC        = float(os.getenv("TP2_SELL_FRAC", "0.35"))
+# TP3: x10 → продать оставшиеся 15% (lottery ticket)
+TP3_PCT              = float(os.getenv("TP3_PCT", "9.00"))       # +900% = x10
+TP3_SELL_FRAC        = float(os.getenv("TP3_SELL_FRAC", "1.00")) # продать всё остальное
 # Lottery: оставшиеся 15% — держим до x10 или time stop (мега-победитель)
+
+# ── Momentum checkpoints (нет цены = токен мёртвый) ─────────────────────────
+# 8 секунд без трейдов → скорее всего pump закончился → выходим по entry
+QUICK_STOP_SEC       = int(os.getenv("QUICK_STOP_SEC", "8"))
+# 30 секунд без трейдов → точно мёртвый, выходим
+MOMENTUM_GATE_SEC    = int(os.getenv("MOMENTUM_GATE_SEC", "30"))
+# Минимальный рост за MOMENTUM_GATE_SEC чтобы НЕ выходить
+MOMENTUM_MIN_PCT     = float(os.getenv("MOMENTUM_MIN_PCT", "0.05"))  # 5% рост
 
 # Trailing: после +25% → SL подтягивается на +15%
 TRAILING_TRIGGER_PCT = float(os.getenv("TRAILING_TRIGGER_PCT", "0.25"))
