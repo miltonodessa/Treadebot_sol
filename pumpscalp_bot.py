@@ -93,8 +93,21 @@ log = logging.getLogger("pumpscalp")
 DRY_RUN              = os.getenv("DRY_RUN", "true").lower() == "true"
 VIRTUAL_BALANCE_SOL  = float(os.getenv("VIRTUAL_BALANCE_SOL", "50.0"))
 
-# ── Pump.fun: фиксированный total supply ────────────────────────────────────
-PUMP_TOTAL_SUPPLY    = 1_000_000_000   # 1B токенов у всех pump.fun монет
+# ── Pump.fun: total supply ───────────────────────────────────────────────────
+PUMP_TOTAL_SUPPLY      = 1_000_000_000   # 1B токенов — стандартный pump.fun
+PUMP_MAYHEM_SUPPLY     = 2_000_000_000   # 2B токенов — Mayhem mode (AI-агент)
+
+# ── Mayhem mode фильтр ───────────────────────────────────────────────────────
+# Mayhem mode: AI-агент (Agent Pumpy) торгует токеном 24h после создания.
+# vTokensInBondingCurve при создании: стандарт ~793M, Mayhem ~1.79B.
+# Причины пропускать:
+#   - Цену двигает AI, а не реальный спрос → паттерны стратегии не работают
+#   - Случайный walk (равные buy/sell) → невозможно предсказать momentum
+#   - После 24h AI сжигает токены → резкий дамп
+SKIP_MAYHEM_MODE       = os.getenv("SKIP_MAYHEM_MODE", "true").lower() == "true"
+MAYHEM_VTOKENS_THRESH  = float(os.getenv("MAYHEM_VTOKENS_THRESH", "1_500_000_000"))  # 1.5B
+# Кошелёк AI-агента (если он в traderPublicKey при создании — Mayhem)
+MAYHEM_AI_AGENT_WALLET = "BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s"
 
 # ── Размер позиции (медиана из реальных данных nya666: 0.338 SOL) ───────────
 BUY_SIZE_SOL         = float(os.getenv("BUY_SIZE_SOL", "0.3"))
@@ -272,7 +285,8 @@ class TokenEvent:
     creator:     str
     created_at:  float
     init_sol:    float    # начальная ликвидность SOL в bonding curve (vSolInBondingCurve)
-    dev_buy_sol: float = 0.0  # сколько SOL вложил создатель при запуске (solAmount в create tx)
+    dev_buy_sol: float = 0.0   # сколько SOL вложил создатель при запуске (solAmount в create tx)
+    is_mayhem:   bool  = False  # Mayhem mode: AI-агент торгует 24h, 2B supply
 
 
 @dataclass
@@ -368,6 +382,7 @@ class BotState:
         self.reentries:        int  = 0
 
         # Статистика фильтров (из token_signals анализа)
+        self.filtered_mayhem:    int = 0  # пропущено Mayhem mode токенов
         self.filtered_dev_buy:   int = 0  # пропущено из-за dev buy 0.5+ SOL
         self.filtered_dead_zone: int = 0  # выходы из-за buyer dead zone на MOMENTUM_GATE
 
@@ -966,6 +981,15 @@ async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
     if age > MAX_TOKEN_AGE_SEC:
         return
 
+    # ── Фильтр Mayhem mode ───────────────────────────────────────────────────
+    # Mayhem: AI-агент (Agent Pumpy) делает случайный buy/sell 24h.
+    # Паттерны стратегии не работают, после 24h AI сжигает токены → дамп.
+    if SKIP_MAYHEM_MODE and event.is_mayhem:
+        state.signals_skipped += 1
+        state.filtered_mayhem = getattr(state, "filtered_mayhem", 0) + 1
+        log.debug("⛔ %s: Mayhem mode → пропуск (AI-агент торгует 24h)", event.symbol)
+        return
+
     # ── Фильтр по dev buy (из анализа token_signals) ────────────────────────
     # Dev buy >= DEV_BUY_SKIP_MIN_SOL: WR=16.3%, avg_pnl=-0.009 → пропускаем
     # Dev buy = нет / <0.5 SOL: WR=32.2% → нормально
@@ -1048,6 +1072,25 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                             if dev_sol > 1e9:
                                 dev_sol = dev_sol / 1e9
 
+                            # ── Mayhem mode detection ─────────────────────────
+                            # Метод 1: явный флаг от pumpportal (если добавят)
+                            is_mayhem = bool(
+                                msg.get("mayhem")
+                                or msg.get("isMayhem")
+                                or msg.get("is_mayhem")
+                            )
+                            # Метод 2: vTokensInBondingCurve > 1.5B (Mayhem = 2B supply)
+                            vtokens = msg.get("vTokensInBondingCurve") or msg.get("tokenAmount") or 0
+                            if vtokens and float(vtokens) >= MAYHEM_VTOKENS_THRESH:
+                                is_mayhem = True
+                            # Метод 3: создатель = AI-агент кошелёк
+                            if trader == MAYHEM_AI_AGENT_WALLET:
+                                is_mayhem = True
+
+                            if is_mayhem:
+                                log.debug("🤖 Mayhem token: %s (%s)  vtokens=%.0f",
+                                          msg.get("symbol", "?"), mint[:8], float(vtokens or 0))
+
                             event = TokenEvent(
                                 mint=mint,
                                 name=msg.get("name", "?"),
@@ -1056,6 +1099,7 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                                 created_at=created_at,
                                 init_sol=float(vsol),
                                 dev_buy_sol=float(dev_sol),
+                                is_mayhem=is_mayhem,
                             )
                             # Немедленная покупка — nya666 не ждёт, скорость = всё
                             asyncio.ensure_future(_buy_token(event, session))
@@ -1164,9 +1208,9 @@ async def status_logger():
         log.info("  Банк: %.4f SOL  |  Позиций: %d/%d  |  Цен в кэше: %d",
                  state.bank, len(state.positions), MAX_POSITIONS, len(_price_cache))
         log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d  "
-                 "(dev_buy: %d  dead_zone: %d)",
+                 "(mayhem: %d  dev_buy: %d  dead_zone: %d)",
                  state.signals_received, state.signals_entered, state.signals_skipped,
-                 state.filtered_dev_buy, state.filtered_dead_zone)
+                 state.filtered_mayhem, state.filtered_dev_buy, state.filtered_dead_zone)
         log.info("  Сделок: %d  |  Wins: %d  |  WR: %.1f%%  |  PnL: %+.4f SOL",
                  state.session_trades, state.session_wins,
                  state.win_rate, state.session_pnl)
