@@ -25,9 +25,9 @@ HELIUS_API = f"https://api.helius.xyz/v0"
 
 WALLET = "nya666pQkP3PzWxi7JngU3rRMHuc7zbLK8c8wxQ4qpT"
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-# DATA_DIR: папка где лежат part_1.xlsx ... part_9.xlsx
-# Можно переопределить через env: DATA_DIR=/path/to/files python token_data_parser.py
-DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent))
+# Путь к nya.xlsx — можно переопределить через env:
+#   XLSX_FILE=/path/to/nya.xlsx python token_data_parser.py
+XLSX_FILE = Path(os.getenv("XLSX_FILE", Path(__file__).parent / "nya.xlsx"))
 OUTPUT_FILE = Path(os.getenv("OUTPUT_FILE", "token_signals.json"))
 
 # Known smart money wallets (add more as discovered)
@@ -45,9 +45,20 @@ RATE_LIMIT_DELAY = 0.15  # seconds between requests
 
 def extract_nya666_mints() -> dict[str, dict]:
     """Returns {mint: {first_buy_ts, first_buy_sol, first_buy_bc_sol, all_buys}}"""
-    print(f"Extracting mints from xlsx files in: {DATA_DIR.resolve()}")
-    found_files = list(DATA_DIR.glob("part_*.xlsx"))
-    print(f"Found files: {[f.name for f in sorted(found_files)]}")
+    if not XLSX_FILE.exists():
+        print(f"ERROR: файл не найден: {XLSX_FILE.resolve()}")
+        print(f"  Положи nya.xlsx рядом со скриптом или укажи путь:")
+        print(f"  XLSX_FILE=/path/to/nya.xlsx python token_data_parser.py")
+        return {}
+
+    print(f"Читаю: {XLSX_FILE.resolve()}")
+    wb = openpyxl.load_workbook(str(XLSX_FILE), read_only=True)
+    ws = wb.active
+    rows = list(ws.rows)
+    headers = [c.value for c in rows[0]]
+    total_rows = len(rows) - 1
+    print(f"Строк в файле: {total_rows}")
+
     mints = defaultdict(lambda: {
         "first_buy_ts": None,
         "first_buy_sol": None,
@@ -55,57 +66,49 @@ def extract_nya666_mints() -> dict[str, dict]:
         "all_buys": [],
     })
 
-    for i in range(1, 10):
-        path = DATA_DIR / f"part_{i}.xlsx"
-        if not path.exists():
+    for idx, row in enumerate(rows[1:], 1):
+        if idx % 10000 == 0:
+            print(f"  Обработано {idx}/{total_rows}...")
+
+        d = {headers[j]: row[j].value for j in range(len(headers))}
+        if not d.get("success"):
+            continue
+        if "Instruction: Buy" not in str(d.get("log_messages", "")):
             continue
 
-        wb = openpyxl.load_workbook(str(path), read_only=True)
-        ws = wb.active
-        rows = list(ws.rows)
-        headers = [c.value for c in rows[0]]
+        sc = _parse_json(d.get("sol_changes"))
+        tc = _parse_json(d.get("token_changes"))
 
-        for row in rows[1:]:
-            d = {headers[j]: row[j].value for j in range(len(headers))}
-            if not d.get("success"):
-                continue
-            if "Instruction: Buy" not in str(d.get("log_messages", "")):
-                continue
+        nya_sc = next((x for x in sc if x["account"] == WALLET), None)
+        nya_tc = next((x for x in tc if x.get("owner") == WALLET), None)
+        if not nya_sc or not nya_tc:
+            continue
 
-            sc = _parse_json(d.get("sol_changes"))
-            tc = _parse_json(d.get("token_changes"))
+        mint = nya_tc["mint"]
+        sol_spent = abs(nya_sc.get("delta_sol", 0))
+        ts = d["block_time"]
 
-            nya_sc = next((x for x in sc if x["account"] == WALLET), None)
-            nya_tc = next((x for x in tc if x.get("owner") == WALLET), None)
-            if not nya_sc or not nya_tc:
-                continue
+        # BC pre-sol = аккаунт получивший SOL (не nya666) с балансом > 0.005 SOL
+        bc_candidates = [
+            x for x in sc
+            if x["account"] != WALLET and x.get("delta_sol", 0) > 0
+            and x.get("pre_lamports", 0) > 5_000_000
+        ]
+        bc = max(bc_candidates, key=lambda x: x.get("delta_sol", 0)) if bc_candidates else None
+        bc_pre_sol = bc["pre_lamports"] / 1e9 if bc else None
 
-            mint = nya_tc["mint"]
-            sol_spent = abs(nya_sc.get("delta_sol", 0))
-            ts = d["block_time"]
+        mints[mint]["all_buys"].append({
+            "ts": ts, "sol": sol_spent, "bc_pre_sol": bc_pre_sol,
+            "signature": d.get("signature", "")
+        })
 
-            # BC pre-sol
-            bc_candidates = [
-                x for x in sc
-                if x["account"] != WALLET and x.get("delta_sol", 0) > 0
-                and x.get("pre_lamports", 0) > 5_000_000
-            ]
-            bc = max(bc_candidates, key=lambda x: x.get("delta_sol", 0)) if bc_candidates else None
-            bc_pre_sol = bc["pre_lamports"] / 1e9 if bc else None
+        if mints[mint]["first_buy_ts"] is None or ts < mints[mint]["first_buy_ts"]:
+            mints[mint]["first_buy_ts"] = ts
+            mints[mint]["first_buy_sol"] = sol_spent
+            mints[mint]["first_buy_bc_sol"] = bc_pre_sol
 
-            mints[mint]["all_buys"].append({
-                "ts": ts, "sol": sol_spent, "bc_pre_sol": bc_pre_sol,
-                "signature": d.get("signature", "")
-            })
-
-            if mints[mint]["first_buy_ts"] is None or ts < mints[mint]["first_buy_ts"]:
-                mints[mint]["first_buy_ts"] = ts
-                mints[mint]["first_buy_sol"] = sol_spent
-                mints[mint]["first_buy_bc_sol"] = bc_pre_sol
-
-        wb.close()
-
-    print(f"Found {len(mints)} unique mints")
+    wb.close()
+    print(f"Найдено уникальных токенов: {len(mints)}")
     return dict(mints)
 
 
