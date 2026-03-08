@@ -1,40 +1,50 @@
 """
-PUMPSCALP v3.0 — Pump.fun Direct Bonding Curve Sniper
-Стратегия полностью реконструирована из 125,075 транзакций кошелька:
-  nya666pQkP3PzWxi7JngU3rRMHuc7zbLK8c8wxQ4qpT (+770 SOL за 28 дней, фев 2026)
+PUMPSCALP v4.0 — Pump.fun Direct Bonding Curve Sniper
+Стратегия реконструирована из ПОЛНОГО анализа 101,190 сделок кошелька:
+  nya666pQkP3PzWxi7JngU3rRMHuc7zbLK8c8wxQ4qpT (9 файлов part_1–9.xlsx)
 
 ══════════════════════════════════════════════════════════════
-  ЧТО РЕАЛЬНО ДЕЛАЕТ ЭТОТ КОШЕЛЁК (из анализа данных):
+  РЕАЛЬНАЯ СТРАТЕГИЯ (из 49,867 завершённых пар buy→sell):
 
-  1. ROUTING: 100% через pump.fun bonding curve напрямую (не Jupiter/Raydium!)
-     - Программа: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
-     - PumpPortal trade-local API: строит tx для подписи локально
+  СТАТИСТИКА:
+    Win rate:     34.6%
+    Avg win:      +41.3%
+    Avg loss:     -17.8%
+    Медиан hold:  23s    (сред. 44s)
+    Best trade:   +39,176%  (держал 38 мин!)
+    EV/сделку:    +2.7%
+    Сделок/день:  ~1,700
 
-  2. ВХОД: покупает КАЖДЫЙ новый pump.fun токен без предфильтрации
-     - Размер: ~0.265 SOL (медиана), 0.10–0.50 SOL (основная масса)
-     - Никакого scoring — скорость важнее выбора
+  1. ВХОД: НЕМЕДЛЕННО на каждый новый токен, без watch-window.
+     - Avg размер: 0.338 SOL. Размер >1 SOL → WR 54% (лучшие конвикции).
+     - Никакого scoring / filtering — скорость = всё.
 
-  3. ВЫХОД — ДВА ОБЯЗАТЕЛЬНЫХ CHECK-POINT-А:
-     - T+5-10s: быстрый стоп (пик при 866 выходов на 5-10s!)
-       → если цена не выросла: выходим немедленно (pre-signed tx)
-     - T+25-30s: momentum gate (второй пик 539 выходов на 25-30s!)
-       → если нет momentum: выходим
-     - Если прошли T+30s: WR 54%+, avg PnL +0.16 SOL → держим!
+  2. ВЫХОДЫ — ДВА CHECKPOINT-А:
+     - T+8s  QUICK_STOP: если цена не выросла → токен мёртвый → выходим.
+       (6,520 выходов на 5-10s из 49,867 — самый большой кластер потерь)
+     - T+25s MOMENTUM_GATE: если рост < 5% → выходим.
+       (ещё ~4,000 выходов на 25-45s)
+     - Прошёл оба gate: WR прыгает до 40-55% → ДЕРЖИМ.
 
-  4. НЕТ SCALE-IN! Есть RE-ENTRY:
-     - Все "повторные покупки" — это НОВЫЕ сделки на тот же токен
-     - После выхода ждём 60-120s, если токен ещё качает — заходим снова
-     - 2-я покупка чуть крупнее (0.297 vs 0.265 SOL) → подтверждённый мувер
+  3. HOLD TIME vs WIN RATE (из данных):
+     - <30s:    WR=25%  avg_win=+25%  (режем лузеров)
+     - 30-60s:  WR=29%  avg_win=+49%
+     - 1-2 мин: WR=40%  avg_win=+59%
+     - 2-5 мин: WR=48%  avg_win=+58%
+     - >5 мин:  WR=55%  avg_win=+52%  ← лучшая зона, держим!
 
-  5. ТЕХНИЧЕСКИЕ ОСОБЕННОСТИ:
-     - Durable Nonces (43.4% транзакций): pre-signed sell tx всегда готов
-     - ComputeBudget: высокий priority fee для первого места в блоке
-     - Параллельный мониторинг: несколько токенов одновременно
+  4. RE-ENTRY: после выхода из позиции, если токен ещё растёт →
+     повторный вход через 60-120s с тем же размером.
+
+  5. TP УРОВНИ (оптимизированы под +41.3% avg win):
+     - TP1 +50%: продаём 35% (фиксируем)
+     - TP2 +100%: продаём 50% оставшегося (защищаем прибыль)
+     - TP3 +500%: продаём остаток (moonbag → mega-winner)
+     - Trailing SL: активируется после +50%, тянется в -15% от пика.
 
   МАТЕМАТИКА:
-    EV = 0.34 × avg_win + 0.66 × avg_loss
-       = 0.34 × (+0.16) + 0.66 × (-0.013) ≈ +0.0457 SOL/trade
-    Сделок в день: ~1800 → ~82 SOL/день ≈ $12,000/day (при SOL $150)
+    EV = 0.346 × 41.3% + 0.654 × (−17.8%) ≈ +2.7% на сделку
+    При 1,700 сделок/день × 0.3 SOL × 2.7% ≈ 13.8 SOL/день
 ══════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -81,79 +91,49 @@ VIRTUAL_BALANCE_SOL  = float(os.getenv("VIRTUAL_BALANCE_SOL", "50.0"))
 # ── Pump.fun: фиксированный total supply ────────────────────────────────────
 PUMP_TOTAL_SUPPLY    = 1_000_000_000   # 1B токенов у всех pump.fun монет
 
-# ── Размер позиции (медиана из данных: 0.265 SOL) ───────────────────────────
-BUY_SIZE_SOL         = float(os.getenv("BUY_SIZE_SOL", "0.5"))
-BUY_SIZE_REENTRY_SOL = float(os.getenv("BUY_SIZE_REENTRY_SOL", str(BUY_SIZE_SOL * 0.6)))
+# ── Размер позиции (медиана из реальных данных nya666: 0.338 SOL) ───────────
+BUY_SIZE_SOL         = float(os.getenv("BUY_SIZE_SOL", "0.3"))
+BUY_SIZE_REENTRY_SOL = float(os.getenv("BUY_SIZE_REENTRY_SOL", str(BUY_SIZE_SOL)))
 MAX_POSITIONS        = int(os.getenv("MAX_POSITIONS", "10"))
 
-# ── Watch window перед покупкой ───────────────────────────────────────────────
-# Из документа: покупать всё сразу = WR 30% = убыток.
-# Ждём WATCH_PERIOD_SEC секунд, собираем данные, считаем Score.
-WATCH_PERIOD_SEC    = int(os.getenv("WATCH_PERIOD_SEC", "15"))    # 15s наблюдения
-MIN_SCORE           = int(os.getenv("MIN_SCORE", "60"))           # порог входа (0..100)
-MIN_BUY_PRESSURE    = float(os.getenv("MIN_BUY_PRESSURE", "0.60"))  # ≥60% buy txs
-MIN_UNIQUE_BUYERS   = int(os.getenv("MIN_UNIQUE_BUYERS", "3"))    # ≥3 уникальных кошелька
+# ── Выходы (из анализа 49,867 завершённых пар) ──────────────────────────────
+# >5 мин WR=55%, time stop не должен рубить раньше
+HARD_TIME_STOP_MIN   = int(os.getenv("HARD_TIME_STOP_MIN", "8"))
+SL_PCT               = float(os.getenv("SL_PCT", "0.15"))         # avg loss = -17.8% → SL 15%
 
-# ── Выходы — из РЕАЛЬНЫХ данных wallet3_analysis.docx ───────────────────────
-# Hold time: <1 мин WR=30% (УБЫТОК!), 1-5 мин WR=50%, 5-30 мин WR=73%
-# Поэтому: минимум 60 секунд, time stop 6 минут
-MIN_HOLD_SEC         = int(os.getenv("MIN_HOLD_SEC", "60"))       # не выходим раньше 60s
-HARD_TIME_STOP_MIN   = int(os.getenv("HARD_TIME_STOP_MIN", "6"))  # 6 мин максимум (WR падает после)
-SL_PCT               = float(os.getenv("SL_PCT", "0.15"))
-# Два источника данных дают разные ответы:
-#   wallet3_analysis.docx (nya666, стратегия которую копируем): SL = -15% (явно задан)
-#   Симуляция на AF6s (7-мин держатель): SL 10% даёт +37% лучше чем 15%
-# Берём -15% из docx т.к. наш MIN_HOLD=60s ближе к nya666 (21s median).
-# При более долгом hold можно понизить через SL_PCT=0.10 в .env.
+# TP1 +50%: продать 35% (avg win +41.3% → первый фикс чуть выше среднего)
+TP1_PCT              = float(os.getenv("TP1_PCT", "0.50"))
+TP1_SELL_FRAC        = float(os.getenv("TP1_SELL_FRAC", "0.35"))
+# TP2 +100%: продать 50% остатка (защита прибыли, оставляем ~15% moonbag)
+TP2_PCT              = float(os.getenv("TP2_PCT", "1.00"))
+TP2_SELL_FRAC        = float(os.getenv("TP2_SELL_FRAC", "0.50"))
+# TP3 +500%: продать весь moonbag (лучший трейд was +39,176%)
+TP3_PCT              = float(os.getenv("TP3_PCT", "5.00"))
+TP3_SELL_FRAC        = float(os.getenv("TP3_SELL_FRAC", "1.00"))
 
-# TP1: +20% → продать 50% (зафиксировать первый импульс)
-TP1_PCT              = float(os.getenv("TP1_PCT", "0.20"))
-TP1_SELL_FRAC        = float(os.getenv("TP1_SELL_FRAC", "0.50"))
-# TP2: +50% → продать ещё 35% (оставляем 15% как lottery ticket)
-TP2_PCT              = float(os.getenv("TP2_PCT", "0.50"))
-TP2_SELL_FRAC        = float(os.getenv("TP2_SELL_FRAC", "0.35"))
-# TP3: x10 → продать оставшиеся 15% (lottery ticket)
-TP3_PCT              = float(os.getenv("TP3_PCT", "9.00"))       # +900% = x10
-TP3_SELL_FRAC        = float(os.getenv("TP3_SELL_FRAC", "1.00")) # продать всё остальное
-# Lottery: оставшиеся 15% — держим до x10 или time stop (мега-победитель)
-
-# ── Momentum checkpoints (нет цены = токен мёртвый) ─────────────────────────
-# 8 секунд без трейдов → скорее всего pump закончился → выходим по entry
+# ── Momentum checkpoints ─────────────────────────────────────────────────────
+# T+8s QUICK_STOP: 6,520 выходов на 5-10s — самый большой кластер потерь.
+# Если цена не выросла (≤ entry) → токен мёртвый → выходим немедленно.
 QUICK_STOP_SEC       = int(os.getenv("QUICK_STOP_SEC", "8"))
-# 30 секунд без трейдов → точно мёртвый, выходим
-MOMENTUM_GATE_SEC    = int(os.getenv("MOMENTUM_GATE_SEC", "30"))
+# T+25s MOMENTUM_GATE: второй кластер выходов. Рост <5% за 25s → dead.
+MOMENTUM_GATE_SEC    = int(os.getenv("MOMENTUM_GATE_SEC", "25"))
 # Минимальный рост за MOMENTUM_GATE_SEC чтобы НЕ выходить
 MOMENTUM_MIN_PCT     = float(os.getenv("MOMENTUM_MIN_PCT", "0.05"))  # 5% рост
 
-# Trailing: после +25% → SL подтягивается на +15%
-TRAILING_TRIGGER_PCT = float(os.getenv("TRAILING_TRIGGER_PCT", "0.25"))
-TRAILING_DISTANCE    = float(os.getenv("TRAILING_DISTANCE", "0.10"))  # -10% от пика
+# Trailing: после +50% → SL подтягивается в -15% от пика
+TRAILING_TRIGGER_PCT = float(os.getenv("TRAILING_TRIGGER_PCT", "0.50"))
+TRAILING_DISTANCE    = float(os.getenv("TRAILING_DISTANCE", "0.15"))  # -15% от пика
 
 # ── Token age (только свежие pump.fun токены) ───────────────────────────────
 MAX_TOKEN_AGE_SEC    = int(os.getenv("MAX_TOKEN_AGE_SEC", "120"))  # не позже 2 мин после запуска
 
-# ── Фильтры входа (из анализа данных) ───────────────────────────────────────
-# WR без фильтров = 37.7% → убыточно. Фильтры поднимают качество потока.
-MIN_DEV_BUY_SOL  = float(os.getenv("MIN_DEV_BUY_SOL", "0.5"))
-# Создатель должен вложить ≥0.5 SOL при запуске.
-# Смысл: дев вложил реальные деньги → не просто rug за 5 секунд.
-# Это самый сильный фильтр: отсекает 80%+ мусорных токенов.
-
-MIN_INIT_SOL     = float(os.getenv("MIN_INIT_SOL", "1.0"))
-# Минимальная ликвидность в bonding curve при создании.
-# <1 SOL = токен создан практически без стартового капитала → очень высокий риск.
-
-MAX_INIT_MCAP_SOL = float(os.getenv("MAX_INIT_MCAP_SOL", "20.0"))
-# Максимальная начальная капитализация (SOL).
-# Если уже >20 SOL mcap при создании → снайперы уже внутри, вход поздний.
-
 # ── Re-entry ─────────────────────────────────────────────────────────────────
-# ДАННЫЕ: n_buys=2+ → WR падает с 72% до 38-60%, avg_pnl уходит в минус.
-# Re-entry отключён (MAX_REENTRIES=0) пока нет доказательств из данных что это работает.
+# Из данных: scale-in на победителях — если токен ещё качает через 60-300s,
+# повторно заходим с тем же размером.
 REENTRY_MIN_SEC      = int(os.getenv("REENTRY_MIN_SEC", "60"))
 REENTRY_MAX_SEC      = int(os.getenv("REENTRY_MAX_SEC", "300"))
 REENTRY_MIN_PUMP_PCT = float(os.getenv("REENTRY_MIN_PUMP_PCT", "0.02"))
-MAX_REENTRIES        = int(os.getenv("MAX_REENTRIES", "0"))   # 0 = отключено
+MAX_REENTRIES        = int(os.getenv("MAX_REENTRIES", "2"))   # до 2 re-entry на токен
 
 # ── Риск ────────────────────────────────────────────────────────────────────
 DAILY_LOSS_LIMIT_SOL = float(os.getenv("DAILY_LOSS_LIMIT_SOL", "5.0"))  # стоп при -5 SOL/день
@@ -233,25 +213,6 @@ class MintHistory:
 
 
 @dataclass
-class WatchEntry:
-    """
-    Токен на наблюдении перед покупкой.
-    Собираем сигналы WATCH_PERIOD_SEC секунд, затем считаем Score.
-    Данные: покупать сразу = WR 30% убыток; ждать сигналов → отсеять 80% мусора.
-    """
-    event:         TokenEvent
-    buy_count:     int   = 0
-    sell_count:    int   = 0
-    unique_buyers: set   = field(default_factory=set)
-    total_buy_sol: float = 0.0
-
-    @property
-    def buy_pressure(self) -> float:
-        total = self.buy_count + self.sell_count
-        return self.buy_count / total if total > 0 else 0.0
-
-
-@dataclass
 class TradeRecord:
     """Запись о закрытой сделке — сохраняется в CSV/JSON для анализа."""
     # Идентификация
@@ -289,7 +250,6 @@ class BotState:
         self.bank:        float = VIRTUAL_BALANCE_SOL if DRY_RUN else 0.0
         self.positions:   dict[str, Position]    = {}
         self.mint_history: dict[str, MintHistory] = defaultdict(MintHistory)
-        self.watch_list: dict[str, WatchEntry] = {}   # токены на наблюдении (до входа)
 
         self.session_trades:  int   = 0
         self.session_wins:    int   = 0
@@ -298,7 +258,7 @@ class BotState:
         self.daily_stopped:   bool  = False
         self.signals_received: int  = 0
         self.signals_entered:  int  = 0
-        self.signals_skipped:  int  = 0   # пропущено по score
+        self.signals_skipped:  int  = 0   # пропущено (max_positions)
         self.reentries:        int  = 0
 
         # История сделок для экспорта
@@ -677,18 +637,23 @@ def _record_closed(pos: Position, final_price: float):
 async def manage_positions(session: aiohttp.ClientSession):
     """
     Вызывается каждые 2 секунды.
+    Реализует реальную стратегию nya666: два checkpoint-а → держим победителей.
     """
     to_remove: list[str] = []
-    to_reenter: list[tuple] = []   # (mint, event) для re-entry после закрытия
 
     for mint, pos in list(state.positions.items()):
         price = await get_bonding_curve_price(mint, session)
         now = time.time()
         age_sec = now - pos.opened_at
 
-        # ── ПРИНУДИТЕЛЬНЫЙ ВЫХОД ПО ВРЕМЕНИ — работает ВСЕГДА, даже без цены ──
-        # Если нет цены используем entry_price (наихудший случай: считаем безубыток,
-        # реально токен скорее всего ниже).
+        # Считаем pnl_pct если есть цена
+        pnl_pct: Optional[float] = None
+        if price and pos.entry_price > 0:
+            pnl_pct = (price - pos.entry_price) / pos.entry_price
+            if price > pos.peak_price:
+                pos.peak_price = price
+
+        # ── HARD TIME STOP — работает всегда ────────────────────────────────
         if age_sec >= HARD_TIME_STOP_MIN * 60:
             close_price = price if price else pos.entry_price
             reason = f"TIME_{HARD_TIME_STOP_MIN}min" + (" [no_price]" if not price else "")
@@ -698,49 +663,58 @@ async def manage_positions(session: aiohttp.ClientSession):
             _record_closed(pos, close_price)
             continue
 
-        # ── НЕТ ЦЕНЫ — выходим по чекпоинтам если время истекло ──────────────
-        # Причина: если нет трейдов → токен мёртвый → держать бессмысленно.
-        if price is None:
-            if not pos.quick_stop_done and age_sec >= QUICK_STOP_SEC:
-                reason = "QUICK_STOP_8s [no_price→dead]"
-                await close_position(pos, 1.0, reason, pos.entry_price, session)
+        # ── T+8s QUICK_STOP: цена не выросла = токен мёртвый ───────────────
+        # Данные: 6,520 выходов на 5-10s (крупнейший кластер потерь)
+        if not pos.quick_stop_done and age_sec >= QUICK_STOP_SEC:
+            is_dead = price is None or pnl_pct is None or pnl_pct <= 0.0
+            if is_dead:
+                close_price = price if price else pos.entry_price
+                reason = "QUICK_STOP_8s"
+                await close_position(pos, 1.0, reason, close_price, session)
                 pos.exit_reason = reason
                 to_remove.append(mint)
-                _record_closed(pos, pos.entry_price)
-            elif pos.quick_stop_done and not pos.momentum_done and age_sec >= MOMENTUM_GATE_SEC:
-                reason = "MOMENTUM_GATE_30s [no_price→dead]"
-                await close_position(pos, 1.0, reason, pos.entry_price, session)
+                _record_closed(pos, close_price)
+                continue
+            else:
+                pos.quick_stop_done = True   # прошли T+8s с позитивным momentum
+
+        # ── T+25s MOMENTUM_GATE: рост < 5% = нет momentum ──────────────────
+        # Данные: второй кластер выходов ~4,000 на 25-45s
+        if pos.quick_stop_done and not pos.momentum_done and age_sec >= MOMENTUM_GATE_SEC:
+            insufficient = price is None or pnl_pct is None or pnl_pct < MOMENTUM_MIN_PCT
+            if insufficient:
+                close_price = price if price else pos.entry_price
+                reason = f"MOMENTUM_GATE_{MOMENTUM_GATE_SEC}s [<{MOMENTUM_MIN_PCT:.0%}]"
+                await close_position(pos, 1.0, reason, close_price, session)
                 pos.exit_reason = reason
                 to_remove.append(mint)
-                _record_closed(pos, pos.entry_price)
+                _record_closed(pos, close_price)
+                continue
+            else:
+                pos.momentum_done = True    # прошли momentum gate → держим!
+
+        # Без цены дальше ничего не делаем (ждём данных)
+        if price is None or pnl_pct is None:
             continue
 
-        # Обновляем peak price
-        if price > pos.peak_price:
-            pos.peak_price = price
+        # ── АКТИВНАЯ ФАЗА: SL → Trailing → TP ──────────────────────────────
 
-        pnl_pct = (price - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+        # Hard SL -15% (данные: avg loss = -17.8%)
+        if pnl_pct <= -SL_PCT:
+            reason = f"SL_{SL_PCT:.0%} {pnl_pct:+.1%}"
+            await close_position(pos, 1.0, reason, price, session)
+            pos.exit_reason = reason
+            to_remove.append(mint)
+            _record_closed(pos, price)
+            continue
 
-        # ── МИНИМАЛЬНЫЙ HOLD: 60 секунд ────────────────────────────────────
-        # Данные wallet3: hold < 1 мин → WR=30% → убыточная зона.
-        # Единственное исключение: аварийный стоп при -15% (твёрдый риск-лимит).
-        if age_sec < MIN_HOLD_SEC:
-            if pnl_pct <= -SL_PCT:
-                reason = f"EMERGENCY_SL {pnl_pct:+.1%}"
-                await close_position(pos, 1.0, reason, price, session)
-                pos.exit_reason = reason
-                to_remove.append(mint)
-                _record_closed(pos, price)
-            continue   # всё остальное — ждём минимум 60 секунд
-
-        # ── АКТИВНАЯ ФАЗА (60s+): данные 1-5 мин WR=50%, 5-30 мин WR=73% ──
-
-        # Trailing stop: после +25% → защищаем прибыль (-10% от пика)
+        # Trailing stop: активируется после +50% → тянется в -15% от пика
         if pnl_pct >= TRAILING_TRIGGER_PCT:
             new_trail = pos.peak_price * (1 - TRAILING_DISTANCE)
             if pos.trailing_sl is None or new_trail > pos.trailing_sl:
                 if pos.trailing_sl is None:
-                    log.info("⚡ Trailing SL: %-10s @%.2e", pos.symbol, new_trail)
+                    log.info("⚡ Trailing SL: %-10s @%.2e (peak +%.0f%%)",
+                             pos.symbol, new_trail, pnl_pct * 100)
                 pos.trailing_sl = new_trail
 
         if pos.trailing_sl and price <= pos.trailing_sl:
@@ -751,33 +725,20 @@ async def manage_positions(session: aiohttp.ClientSession):
             _record_closed(pos, price)
             continue
 
-        # Hard SL -15% (данные: avg_loss = 19.7%, ставим чуть меньше)
-        if pnl_pct <= -SL_PCT:
-            reason = f"SL_15pct {pnl_pct:+.1%}"
-            await close_position(pos, 1.0, reason, price, session)
-            pos.exit_reason = reason
-            to_remove.append(mint)
-            _record_closed(pos, price)
-            continue
-
-        # Time stop 6 мин (данные: WR падает после 5-6 мин у большинства токенов)
-        if age_sec >= HARD_TIME_STOP_MIN * 60:
-            reason = f"TIME_{HARD_TIME_STOP_MIN}min {pnl_pct:+.1%}"
-            await close_position(pos, 1.0, reason, price, session)
-            pos.exit_reason = reason
-            to_remove.append(mint)
-            _record_closed(pos, price)
-            continue
-
-        # TP1: +20% → продать 50% (зафиксировать первый импульс)
+        # TP1 +50% → продаём 35%
         if not pos.tp1_done and pnl_pct >= TP1_PCT:
             await close_position(pos, TP1_SELL_FRAC, f"TP1 +{TP1_PCT:.0%}", price, session)
             pos.tp1_done = True
 
-        # TP2: +50% → продать ещё 35% (оставить 15% как lottery)
-        elif not pos.tp2_done and pos.tp1_done and pnl_pct >= TP2_PCT:
+        # TP2 +100% → продаём 50% оставшегося (moonbag ~15%)
+        if not pos.tp2_done and pos.tp1_done and pnl_pct >= TP2_PCT:
             await close_position(pos, TP2_SELL_FRAC, f"TP2 +{TP2_PCT:.0%}", price, session)
             pos.tp2_done = True
+
+        # TP3 +500% → закрываем moonbag
+        if not pos.tp3_done and pos.tp2_done and pnl_pct >= TP3_PCT:
+            await close_position(pos, TP3_SELL_FRAC, f"TP3 +{TP3_PCT:.0%}", price, session)
+            pos.tp3_done = True
 
         if pos.token_balance <= 0:
             pos.exit_reason = "ALL_TP"
@@ -854,98 +815,18 @@ async def check_reentries(session: aiohttp.ClientSession):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SCORE-СИСТЕМА + WATCH WINDOW (из анализа реальных данных)
+# НЕМЕДЛЕННЫЙ ВХОД (реальная стратегия nya666)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _calc_score(w: WatchEntry) -> tuple[int, str]:
+async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
     """
-    Score 0–100 для токена после периода наблюдения.
-    Основан на Score System v2 из анализа кошелька nya666.
-    Порог: MIN_SCORE (по умолчанию 60).
+    Немедленная покупка токена при получении события создания.
+    nya666 не использует watch window или score — скорость важнее отбора.
+    Checkpoints (T+8s, T+25s) режут мёртвые позиции уже после входа.
     """
-    score = 0
-    reasons: list[str] = []
-
-    # ── Возраст (< 120s = +25pts) ────────────────────────────────────────────
-    age = time.time() - w.event.created_at
-    if age < 60:
-        score += 25
-        reasons.append("age<60s")
-    elif age < 120:
-        score += 15
-        reasons.append("age<120s")
-
-    # ── Dev buy (создатель вложил реальные деньги) ───────────────────────────
-    if w.event.dev_buy_sol >= 2.0:
-        score += 25
-        reasons.append(f"dev={w.event.dev_buy_sol:.1f}")
-    elif w.event.dev_buy_sol >= 1.0:
-        score += 20
-        reasons.append(f"dev={w.event.dev_buy_sol:.1f}")
-    elif w.event.dev_buy_sol >= 0.5:
-        score += 12
-        reasons.append(f"dev={w.event.dev_buy_sol:.1f}")
-    elif w.event.dev_buy_sol < MIN_DEV_BUY_SOL:
-        return 0, f"dev_buy {w.event.dev_buy_sol:.3f} < {MIN_DEV_BUY_SOL}"  # hard filter
-
-    # ── Buy pressure (% buy из всех сделок за период) ────────────────────────
-    if w.buy_pressure >= 0.80:
-        score += 20
-        reasons.append(f"pressure={w.buy_pressure:.0%}")
-    elif w.buy_pressure >= 0.65:
-        score += 12
-        reasons.append(f"pressure={w.buy_pressure:.0%}")
-    elif w.buy_pressure < MIN_BUY_PRESSURE and (w.buy_count + w.sell_count) >= 3:
-        return 0, f"low pressure {w.buy_pressure:.0%}"  # hard filter (если есть данные)
-
-    # ── Уникальные покупатели ─────────────────────────────────────────────────
-    nb = len(w.unique_buyers)
-    if nb >= 15:
-        score += 20
-        reasons.append(f"buyers={nb}")
-    elif nb >= 8:
-        score += 15
-        reasons.append(f"buyers={nb}")
-    elif nb >= MIN_UNIQUE_BUYERS:
-        score += 8
-        reasons.append(f"buyers={nb}")
-    elif (w.buy_count + w.sell_count) >= 5:
-        return 0, f"too few buyers {nb}"  # hard filter (если данных достаточно)
-
-    # ── Объём за период наблюдения ───────────────────────────────────────────
-    if w.total_buy_sol >= 5.0:
-        score += 15
-        reasons.append(f"vol={w.total_buy_sol:.1f}")
-    elif w.total_buy_sol >= 2.0:
-        score += 10
-        reasons.append(f"vol={w.total_buy_sol:.1f}")
-    elif w.total_buy_sol >= 0.5:
-        score += 5
-
-    # ── Низкая начальная mcap ─────────────────────────────────────────────────
-    if 0 < w.event.init_sol <= 5:
-        score += 10
-        reasons.append(f"mcap={w.event.init_sol:.1f}")
-    elif w.event.init_sol > MAX_INIT_MCAP_SOL:
-        return 0, f"mcap {w.event.init_sol:.1f} > max {MAX_INIT_MCAP_SOL}"
-
-    return score, " | ".join(reasons) if reasons else "no_signals"
-
-
-def _score_to_size(score: int) -> float:
-    """Confidence-weighted sizing — из документа: чем выше score, тем больше размер."""
-    if score >= 85:
-        return BUY_SIZE_SOL * 2.0   # высокая уверенность
-    if score >= 70:
-        return BUY_SIZE_SOL * 1.5
-    return BUY_SIZE_SOL             # базовый размер
-
-
-def _add_to_watchlist(event: TokenEvent):
-    """Добавить токен в watch_list для наблюдения перед покупкой."""
     mint = event.mint
 
-    if mint in state.positions or mint in state.watch_list:
+    if mint in state.positions:
         return
     if mint in state.mint_history and state.mint_history[mint].last_exit_time > 0:
         return  # уже торговали этим токеном
@@ -954,69 +835,18 @@ def _add_to_watchlist(event: TokenEvent):
     if age > MAX_TOKEN_AGE_SEC:
         return
 
-    # Базовый фильтр mcap (hard, не ждём score)
-    if event.init_sol > MAX_INIT_MCAP_SOL:
-        log.debug("SKIP %s: init_sol %.1f > max", event.symbol, event.init_sol)
+    if not state.can_open():
+        state.signals_skipped += 1
         return
 
-    state.watch_list[mint] = WatchEntry(event=event)
-    log.debug("👁 WATCH  %-10s  dev=%.2f SOL  mcap=%.1f SOL  (%ds)",
-              event.symbol, event.dev_buy_sol, event.init_sol, int(age))
-
-
-async def watch_evaluator(session: aiohttp.ClientSession):
-    """
-    Каждые 2 секунды проверяем watch_list.
-    Токены, пережившие WATCH_PERIOD_SEC — оцениваем по Score.
-    Score ≥ MIN_SCORE → покупаем. Ниже → пропускаем.
-
-    Данные: без фильтров WR=30% (убыток). Score-система должна поднять до 50%+.
-    """
-    while True:
-        await asyncio.sleep(2)
-        now = time.time()
-        to_remove: list[str] = []
-
-        for mint, w in list(state.watch_list.items()):
-            age = now - w.event.created_at
-
-            if age < WATCH_PERIOD_SEC:
-                continue   # ещё наблюдаем
-
-            to_remove.append(mint)
-
-            # Токен слишком старый
-            if age > MAX_TOKEN_AGE_SEC:
-                log.debug("WATCH_EXPIRE %s (%.0fs)", w.event.symbol, age)
-                state.signals_skipped += 1
-                continue
-
-            if mint in state.positions or not state.can_open():
-                continue
-
-            score, reason = _calc_score(w)
-            if score < MIN_SCORE:
-                log.debug("SKIP %-10s score=%d<%d (%s)",
-                          w.event.symbol, score, MIN_SCORE, reason)
-                state.signals_skipped += 1
-                continue
-
-            buy_sol = _score_to_size(score)
-            log.info("📊 %-10s score=%d  buyers=%d  pressure=%.0f%%  dev=%.2f  → %.2f SOL",
-                     w.event.symbol, score, len(w.unique_buyers),
-                     w.buy_pressure * 100, w.event.dev_buy_sol, buy_sol)
-
-            pos = await open_position(w.event, buy_sol, is_reentry=False,
-                                      reentry_count=0, session=session)
-            if pos:
-                state.positions[mint] = pos
-                state.signals_entered += 1
-                if mint not in state.mint_history:
-                    state.mint_history[mint] = MintHistory()
-                state.mint_history[mint].first_seen = w.event.created_at
-
-        for m in to_remove:
-            state.watch_list.pop(m, None)
+    pos = await open_position(event, BUY_SIZE_SOL, is_reentry=False,
+                              reentry_count=0, session=session)
+    if pos:
+        state.positions[mint] = pos
+        state.signals_entered += 1
+        if mint not in state.mint_history:
+            state.mint_history[mint] = MintHistory()
+        state.mint_history[mint].first_seen = event.created_at
 
 
 async def pumpportal_listener(session: aiohttp.ClientSession):
@@ -1085,8 +915,8 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                                 init_sol=float(vsol),
                                 dev_buy_sol=float(dev_sol),
                             )
-                            # Добавляем в watch_list — покупаем только после оценки score
-                            _add_to_watchlist(event)
+                            # Немедленная покупка — nya666 не ждёт, скорость = всё
+                            asyncio.ensure_future(_buy_token(event, session))
 
                         else:
                             # Торговое событие — обновляем цену И данные для score
@@ -1097,18 +927,6 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
 
                             if sol_amount and token_amount:
                                 update_price_from_trade(mint, sol_amount, token_amount, is_buy)
-
-                            # Если токен на наблюдении — собираем сигналы для score
-                            if mint in state.watch_list:
-                                w = state.watch_list[mint]
-                                sa = sol_amount if sol_amount < 1e6 else sol_amount / 1e9
-                                if is_buy:
-                                    w.buy_count += 1
-                                    w.total_buy_sol += float(sa)
-                                    if trader:
-                                        w.unique_buyers.add(trader)
-                                else:
-                                    w.sell_count += 1
 
         except websockets.ConnectionClosed:
             log.warning("WS закрыт, переподключение через 3s...")
@@ -1198,9 +1016,8 @@ async def status_logger():
                  "DRY RUN 🟡" if DRY_RUN else "LIVE 🟢")
         log.info("  Банк: %.4f SOL  |  Позиций: %d/%d  |  Цен в кэше: %d",
                  state.bank, len(state.positions), MAX_POSITIONS, len(_price_cache))
-        log.info("  Сигналов: %d  |  В watch: %d  |  Входов: %d  |  Пропущено: %d",
-                 state.signals_received, len(state.watch_list),
-                 state.signals_entered, state.signals_skipped)
+        log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d",
+                 state.signals_received, state.signals_entered, state.signals_skipped)
         log.info("  Сделок: %d  |  Wins: %d  |  WR: %.1f%%  |  PnL: %+.4f SOL",
                  state.session_trades, state.session_wins,
                  state.win_rate, state.session_pnl)
@@ -1379,21 +1196,21 @@ async def main():
     global _keypair
 
     log.info("═" * 65)
-    log.info("  PUMPSCALP v3.0  —  Pump.fun Direct Bonding Curve Sniper")
-    log.info("  Стратегия из анализа 125,075 транзакций +770 SOL/28дней")
+    log.info("  PUMPSCALP v4.0  —  Pump.fun Direct Bonding Curve Sniper")
+    log.info("  Стратегия: 101,190 сделок nya666 | WR=34.6%% EV=+2.7%%/trade")
     log.info("  Режим: %s  |  Банк: %.1f SOL",
              "DRY RUN 🟡" if DRY_RUN else "LIVE 🟢",
              state.bank)
-    log.info("  Размер: %.2f SOL (re-entry %.2f SOL)  |  Max позиций: %d",
+    log.info("  Размер: %.2f SOL  |  Re-entry: %.2f SOL  |  Max позиций: %d",
              BUY_SIZE_SOL, BUY_SIZE_REENTRY_SOL, MAX_POSITIONS)
     log.info("  Quick stop T+%ds  |  Momentum gate T+%ds ≥+%.0f%%  |  Time stop %d мин",
              QUICK_STOP_SEC, MOMENTUM_GATE_SEC,
              MOMENTUM_MIN_PCT * 100, HARD_TIME_STOP_MIN)
-    log.info("  TP1 +%.0f%%→%.0f%%  TP2 +%.0f%%→%.0f%%  TP3 +%.0f%%→%.0f%%  Trail -%d%%",
+    log.info("  TP1 +%.0f%%→%.0f%%  TP2 +%.0f%%→%.0f%%  TP3 +%.0f%%→%.0f%%  Trail after+%.0f%% (-%.0f%%)",
              TP1_PCT*100, TP1_SELL_FRAC*100,
              TP2_PCT*100, TP2_SELL_FRAC*100,
              TP3_PCT*100, TP3_SELL_FRAC*100,
-             TRAILING_DISTANCE*100)
+             TRAILING_TRIGGER_PCT*100, TRAILING_DISTANCE*100)
     log.info("═" * 65)
 
     if not DRY_RUN:
@@ -1407,7 +1224,7 @@ async def main():
             pumpportal_listener(session),
             subscribe_to_active_tokens(session),
             position_monitor(session),
-            watch_evaluator(session),      # score-система: оцениваем и покупаем
+            reentry_monitor(session),
             status_logger(),
             daily_reset(),
             autosave_loop(),
