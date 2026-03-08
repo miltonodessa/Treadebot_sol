@@ -235,7 +235,7 @@ async def _rpc_call(session: aiohttp.ClientSession, method: str, params: list) -
     for attempt in range(3):
         try:
             async with session.post(
-                HELIUS_RPC, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+                HELIUS_RPC, json=payload, timeout=aiohttp.ClientTimeout(total=15), ssl=False
             ) as resp:
                 if resp.status == 429:
                     wait = 2 ** attempt
@@ -378,7 +378,7 @@ async def _fetch_token_metadata_rest(session: aiohttp.ClientSession, mint: str) 
     payload = {"mintAccounts": [mint], "includeOffChain": True, "disableCache": False}
     try:
         async with session.post(url, params=params, json=payload,
-                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                                timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
             if resp.status != 200:
                 return {}
             data = await resp.json()
