@@ -1,2 +1,0 @@
-opened_at,closed_at,hold_sec,symbol,mint,gmgn_url,entry_sol,exit_sol,pnl_sol,pnl_pct,exit_reason,is_reentry,reentry_num,passed_quick_stop,passed_momentum
-2026-03-07T22:37:46.837554+00:00,2026-03-07T22:37:50.182402+00:00,3.3,Monkey,Dw8Zup2kPpSbZVMWbL8LSj3Dr4vg1QmX2DRwm26hpump,https://gmgn.ai/sol/token/Dw8Zup2kPpSbZVMWbL8LSj3Dr4vg1QmX2DRwm26hpump,0.1,0.093197,-0.006803,-6.8,IMMEDIATE_SL -6.8%,False,0,False,False
