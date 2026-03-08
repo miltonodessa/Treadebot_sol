@@ -25,8 +25,10 @@ HELIUS_API = f"https://api.helius.xyz/v0"
 
 WALLET = "nya666pQkP3PzWxi7JngU3rRMHuc7zbLK8c8wxQ4qpT"
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-DATA_DIR = Path("/tmp")
-OUTPUT_FILE = Path("token_signals.json")
+# DATA_DIR: папка где лежат part_1.xlsx ... part_9.xlsx
+# Можно переопределить через env: DATA_DIR=/path/to/files python token_data_parser.py
+DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).parent))
+OUTPUT_FILE = Path(os.getenv("OUTPUT_FILE", "token_signals.json"))
 
 # Known smart money wallets (add more as discovered)
 KNOWN_SMART_WALLETS = {
@@ -43,7 +45,9 @@ RATE_LIMIT_DELAY = 0.15  # seconds between requests
 
 def extract_nya666_mints() -> dict[str, dict]:
     """Returns {mint: {first_buy_ts, first_buy_sol, first_buy_bc_sol, all_buys}}"""
-    print("Extracting mints from xlsx files...")
+    print(f"Extracting mints from xlsx files in: {DATA_DIR.resolve()}")
+    found_files = list(DATA_DIR.glob("part_*.xlsx"))
+    print(f"Found files: {[f.name for f in sorted(found_files)]}")
     mints = defaultdict(lambda: {
         "first_buy_ts": None,
         "first_buy_sol": None,
