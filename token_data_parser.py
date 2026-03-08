@@ -19,9 +19,10 @@ from datetime import datetime, timezone
 import os
 
 # ---- CONFIG ----
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")  # Set via env var
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "23df9945-a693-4412-95f5-f47ce65b3e4d")
 HELIUS_RPC = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-HELIUS_API = f"https://api.helius.xyz/v0"
+# Enhanced API base (для /addresses/.../transactions и /token-metadata)
+HELIUS_API = "https://api.helius.xyz/v0"
 
 WALLET = "nya666pQkP3PzWxi7JngU3rRMHuc7zbLK8c8wxQ4qpT"
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -352,25 +353,33 @@ async def process_mint(
 
 
 async def main():
+    import sys
+    force = "--force" in sys.argv
+
     if not HELIUS_API_KEY:
         print("ERROR: Set HELIUS_API_KEY environment variable")
         print("  export HELIUS_API_KEY=your_key_here")
         return
 
-    # Load already processed mints
+    # Load already processed mints (пропускается при --force)
     existing = {}
-    if OUTPUT_FILE.exists():
+    if OUTPUT_FILE.exists() and not force:
         with open(OUTPUT_FILE) as f:
             for item in json.load(f):
                 existing[item["mint"]] = item
-        print(f"Loaded {len(existing)} already processed mints")
+        print(f"Загружено уже обработанных: {len(existing)} (--force чтобы сбросить)")
+    elif force:
+        print("--force: сбрасываю кэш, обработка с нуля")
 
     # Extract mints from xlsx
     all_mints = extract_nya666_mints()
 
+    if not all_mints:
+        return
+
     # Filter unprocessed
     to_process = {m: d for m, d in all_mints.items() if m not in existing}
-    print(f"Mints to process: {len(to_process)} (skipping {len(existing)} already done)")
+    print(f"К обработке: {len(to_process)} (пропускаю {len(existing)} уже готовых)")
 
     if not to_process:
         print("Nothing to process. Analyzing existing data...")
