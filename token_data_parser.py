@@ -691,7 +691,7 @@ async def main():
     results = list(existing.values())
     semaphore = asyncio.Semaphore(CONCURRENCY)
 
-    connector = aiohttp.TCPConnector(limit=CONCURRENCY)
+    connector = aiohttp.TCPConnector(limit=CONCURRENCY, ssl=False)
     async with aiohttp.ClientSession(connector=connector) as session:
         # known_wallets для передачи в fetch_early_buyers
         known = {w: wallet_labels[w] for w in all_wallets.keys()}
