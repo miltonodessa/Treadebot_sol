@@ -21,8 +21,8 @@ import os
 # ---- CONFIG ----
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "23df9945-a693-4412-95f5-f47ce65b3e4d")
 HELIUS_RPC = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-# Enhanced API base (для /addresses/.../transactions и /token-metadata)
-HELIUS_API = "https://api.helius.xyz/v0"
+# Enhanced API base: api-key передаётся отдельно в params каждого запроса
+HELIUS_API = "https://api-mainnet.helius-rpc.com/v0"
 
 WALLET = "nya666pQkP3PzWxi7JngU3rRMHuc7zbLK8c8wxQ4qpT"
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
