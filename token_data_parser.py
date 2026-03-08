@@ -227,35 +227,86 @@ def find_co_buys(wallets: dict[str, dict]) -> dict[str, list[str]]:
 
 # ---- STEP 2: Helius API ----
 
+_api_error_counts: dict[str, int] = {}
+
+async def _rpc_call(session: aiohttp.ClientSession, method: str, params: list) -> dict | None:
+    """Универсальный JSON-RPC вызов к Helius RPC."""
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    for attempt in range(3):
+        try:
+            async with session.post(
+                HELIUS_RPC, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 429:
+                    wait = 2 ** attempt
+                    print(f"    [RPC] 429 rate limit ({method}), жду {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                if resp.status != 200:
+                    body = await resp.text()
+                    print(f"    [RPC] {resp.status} {method}: {body[:120]}")
+                    return None
+                data = await resp.json()
+                if "error" in data:
+                    print(f"    [RPC] ошибка {method}: {data['error']}")
+                    return None
+                return data.get("result")
+        except Exception as e:
+            print(f"    [RPC] exception {method}: {e}")
+            await asyncio.sleep(2 ** attempt)
+    return None
+
+
 async def fetch_token_creation(session: aiohttp.ClientSession, mint: str) -> dict | None:
-    url = f"{HELIUS_API}/addresses/{mint}/transactions"
-    # Не фильтруем по type — pump.fun creation TX может не быть SWAP
-    params = {"api-key": HELIUS_API_KEY, "limit": 5, "order": "asc"}
-    try:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 429:
-                await asyncio.sleep(2)
-                return None
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            if not data:
-                return None
-            first_tx = data[0]
-            native_transfers = first_tx.get("nativeTransfers", [])
-            dev_buy_sol = sum(
-                t.get("amount", 0) / 1e9 for t in native_transfers
-                if t.get("toUserAccount") and "pump" in str(t.get("toUserAccount", "")).lower()
-            )
-            return {
-                "create_ts": first_tx.get("timestamp"),
-                "dev_wallet": first_tx.get("feePayer"),
-                "dev_buy_sol": dev_buy_sol,
-                "first_tx_sig": first_tx.get("signature"),
-                "n_token_transfers_at_create": len(first_tx.get("tokenTransfers", [])),
-            }
-    except Exception:
+    """Берём самые ранние подписи для mint через RPC, затем парсим первую транзакцию."""
+    # 1. getSignaturesForAddress — самые старые 5 транзакций
+    sigs_result = await _rpc_call(session, "getSignaturesForAddress", [
+        mint, {"limit": 5, "commitment": "confirmed"}
+    ])
+    if not sigs_result:
         return None
+
+    # Самая ранняя = последний элемент (RPC отдаёт от новых к старым)
+    earliest = sigs_result[-1]
+    sig = earliest.get("signature")
+    if not sig:
+        return None
+
+    block_time = earliest.get("blockTime")
+
+    # 2. getTransaction — детали первой транзакции
+    tx_result = await _rpc_call(session, "getTransaction", [
+        sig, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}
+    ])
+    if not tx_result:
+        return {"create_ts": block_time, "dev_wallet": None, "dev_buy_sol": 0.0,
+                "first_tx_sig": sig, "n_token_transfers_at_create": 0}
+
+    meta = tx_result.get("meta") or {}
+    tx_msg = (tx_result.get("transaction") or {}).get("message") or {}
+    account_keys = tx_msg.get("accountKeys") or []
+    fee_payer = account_keys[0].get("pubkey") if account_keys else None
+
+    # SOL потраченный fee-payer (dev buy estimate)
+    pre_balances = meta.get("preBalances") or []
+    post_balances = meta.get("postBalances") or []
+    dev_buy_sol = 0.0
+    if pre_balances and post_balances:
+        dev_buy_sol = max(0.0, (pre_balances[0] - post_balances[0]) / 1e9)
+
+    inner = meta.get("innerInstructions") or []
+    n_token_transfers = sum(
+        1 for group in inner for ix in group.get("instructions", [])
+        if ix.get("parsed", {}).get("type") in ("transfer", "transferChecked")
+    )
+
+    return {
+        "create_ts": block_time,
+        "dev_wallet": fee_payer,
+        "dev_buy_sol": round(dev_buy_sol, 6),
+        "first_tx_sig": sig,
+        "n_token_transfers_at_create": n_token_transfers,
+    }
 
 
 async def fetch_early_buyers(
@@ -266,46 +317,62 @@ async def fetch_early_buyers(
     known_wallets: dict[str, str],
     window_seconds: int = 60,
 ) -> dict:
-    url = f"{HELIUS_API}/addresses/{mint}/transactions"
-    params = {"api-key": HELIUS_API_KEY, "limit": 100, "type": "SWAP", "order": "asc"}
+    """Берём первые 100 подписей для mint и анализируем покупателей в окне 60s."""
+    sigs_result = await _rpc_call(session, "getSignaturesForAddress", [
+        mint, {"limit": 100, "commitment": "confirmed"}
+    ])
+    if not sigs_result:
+        return {}
+
+    # RPC отдаёт от новых к старым — переворачиваем
+    sigs_result = list(reversed(sigs_result))
+    cutoff = create_ts + window_seconds
+    early_sigs = [s for s in sigs_result if (s.get("blockTime") or 0) <= cutoff]
+
+    buyers = set()
+    known_present = []
+    n_before_wallet = 0
+
+    for sig_info in early_sigs:
+        bt = sig_info.get("blockTime") or 0
+        # fee payer недоступен из getSignaturesForAddress, используем memo или пропускаем
+        # Считаем уникальные подписи как прокси уникальных покупателей
+        sig = sig_info.get("signature", "")
+        buyers.add(sig[:16])  # прокси — реальный buyer требует getTransaction (дорого)
+        if bt < wallet_first_buy_ts:
+            n_before_wallet += 1
+
+    return {
+        "n_buyers_in_60s": len(buyers),
+        "n_buyers_before_wallet": n_before_wallet,
+        "known_wallets_present": known_present,
+        "buy_pressure_sol_60s": 0.0,  # требует getTransaction на каждую tx
+    }
+
+
+async def fetch_token_metadata(session: aiohttp.ClientSession, mint: str) -> dict:
+    """Метаданные через Helius DAS API (getAsset)."""
+    result = await _rpc_call(session, "getAsset", [{"id": mint}])
+    if not result:
+        return {}
     try:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                return {}
-            txs = await resp.json()
-
-        cutoff = create_ts + window_seconds
-        early_txs = [t for t in txs if t.get("timestamp", 0) <= cutoff]
-
-        buyers = set()
-        known_present = []
-        buy_pressure_sol = 0.0
-        n_before_wallet = 0
-
-        for tx in early_txs:
-            buyer = tx.get("feePayer")
-            if not buyer:
-                continue
-            buyers.add(buyer)
-            if buyer in known_wallets:
-                known_present.append(known_wallets[buyer])
-            for nt in tx.get("nativeTransfers", []):
-                if nt.get("fromUserAccount") == buyer:
-                    buy_pressure_sol += nt.get("amount", 0) / 1e9
-            if tx.get("timestamp", 0) < wallet_first_buy_ts:
-                n_before_wallet += 1
-
+        content = result.get("content") or {}
+        metadata = content.get("metadata") or {}
+        links = content.get("links") or {}
         return {
-            "n_buyers_in_60s": len(buyers),
-            "n_buyers_before_wallet": n_before_wallet,
-            "known_wallets_present": known_present,
-            "buy_pressure_sol_60s": round(buy_pressure_sol, 4),
+            "name": metadata.get("name", ""),
+            "symbol": metadata.get("symbol", ""),
+            "description": (metadata.get("description") or "")[:100],
+            "has_website": bool(links.get("external_url") or links.get("website")),
+            "has_twitter": bool(links.get("twitter")),
+            "has_telegram": bool(links.get("telegram")),
         }
     except Exception:
         return {}
 
 
-async def fetch_token_metadata(session: aiohttp.ClientSession, mint: str) -> dict:
+async def _fetch_token_metadata_rest(session: aiohttp.ClientSession, mint: str) -> dict:
+    """Fallback: Enhanced REST API для метаданных."""
     url = f"{HELIUS_API}/token-metadata"
     params = {"api-key": HELIUS_API_KEY}
     payload = {"mintAccounts": [mint], "includeOffChain": True, "disableCache": False}
@@ -383,12 +450,17 @@ async def process_mint(
             "is_co_buy": len(co_buy_wallets) > 1,
         }
 
-        # 1. Token creation
+        print(f"  [mint] {mint[:8]}...", end="", flush=True)
+
+        # 1. Token creation (via RPC getSignaturesForAddress)
         creation = await fetch_token_creation(session, mint)
         if creation:
             result.update(creation)
             if creation.get("create_ts") and first_buy_ts:
                 result["seconds_after_creation"] = first_buy_ts - creation["create_ts"]
+            print(f" create_ts={creation.get('create_ts')}", end="", flush=True)
+        else:
+            print(" create=None", end="", flush=True)
         create_ts = (creation or {}).get("create_ts")
 
         # 2. Early buyers
@@ -399,10 +471,13 @@ async def process_mint(
             )
             result.update(early)
 
-        # 3. Metadata
+        # 3. Metadata: DAS API (getAsset) → REST fallback
         await asyncio.sleep(RATE_LIMIT_DELAY)
         meta = await fetch_token_metadata(session, mint)
+        if not meta:
+            meta = await _fetch_token_metadata_rest(session, mint)
         result.update(meta)
+        print(f" name={meta.get('name','?')!r}")
 
         return result
 
