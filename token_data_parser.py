@@ -25,7 +25,7 @@ import os
 # ---- CONFIG ----
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "23df9945-a693-4412-95f5-f47ce65b3e4d")
 HELIUS_RPC = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-HELIUS_API = "https://api-mainnet.helius-rpc.com/v0"
+HELIUS_API = "https://api.helius.xyz/v0"
 
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
@@ -42,17 +42,12 @@ RATE_LIMIT_DELAY = 0.15
 
 def find_xlsx_files() -> list[Path]:
     """Находит все xlsx файлы с транзакциями в DATA_DIR."""
+    seen = set()
     files = []
-    # Приоритет: nya.xlsx
-    nya = DATA_DIR / "nya.xlsx"
-    if nya.exists():
-        files.append(nya)
-    # Все *_full_report.xlsx
-    for f in sorted(DATA_DIR.glob("*_full_report.xlsx")):
-        files.append(f)
-    # Любые другие xlsx (part_*.xlsx и т.п.)
-    for f in sorted(DATA_DIR.glob("part_*.xlsx")):
-        files.append(f)
+    for f in sorted(DATA_DIR.glob("*.xlsx")):
+        if f not in seen:
+            seen.add(f)
+            files.append(f)
     return files
 
 
