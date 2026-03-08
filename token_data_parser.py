@@ -181,6 +181,8 @@ def extract_all_wallets() -> dict[str, dict]:
         return {}
 
     print(f"\nНайдено файлов: {len(files)}")
+    for f in files:
+        print(f"  {f.name}")
     wallets: dict[str, dict] = {}  # wallet -> {mint -> data}
 
     for path in files:
@@ -227,7 +229,8 @@ def find_co_buys(wallets: dict[str, dict]) -> dict[str, list[str]]:
 
 async def fetch_token_creation(session: aiohttp.ClientSession, mint: str) -> dict | None:
     url = f"{HELIUS_API}/addresses/{mint}/transactions"
-    params = {"api-key": HELIUS_API_KEY, "limit": 5, "type": "SWAP", "order": "asc"}
+    # Не фильтруем по type — pump.fun creation TX может не быть SWAP
+    params = {"api-key": HELIUS_API_KEY, "limit": 5, "order": "asc"}
     try:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status == 429:
@@ -604,6 +607,11 @@ async def main():
                 tasks_args.append((mint, data, wallet, label, co_wallets))
 
     print(f"\nК обработке: {len(tasks_args)} (пропускаю {len(existing)} из кэша)")
+    if not tasks_args:
+        print("  → 0 новых токенов. Все mint'ы уже в кэше.")
+        print("  → Запусти с --force чтобы пересчитать с нуля: python token_data_parser.py --force")
+        analyze_all(list(existing.values()), wallet_labels)
+        return
 
     results = list(existing.values())
     semaphore = asyncio.Semaphore(CONCURRENCY)
