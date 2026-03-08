@@ -143,6 +143,20 @@ MAX_REENTRIES        = int(os.getenv("MAX_REENTRIES", "2"))   # до 2 re-entry 
 # ── Риск ────────────────────────────────────────────────────────────────────
 DAILY_LOSS_LIMIT_SOL = float(os.getenv("DAILY_LOSS_LIMIT_SOL", "5.0"))  # стоп при -5 SOL/день
 
+# ── Фильтры на основе данных token_signals (25,987 сделок) ──────────────────
+# Dev buy 0.5-2 SOL: WR=16.3%, avg_pnl=-0.0093 → пропускать
+# Dev buy >2 SOL: WR=24.1% → пропускать (слишком агрессивный дев)
+# Dev buy 0-0.5 SOL: WR=29%, dev buy = нет: WR=32.2% → нормально
+DEV_BUY_SKIP_MIN_SOL = float(os.getenv("DEV_BUY_SKIP_MIN_SOL", "0.5"))
+DEV_BUY_SKIP_MAX_SOL = float(os.getenv("DEV_BUY_SKIP_MAX_SOL", "9999.0"))  # skip 0.5+ SOL dev buys
+
+# Зона смерти по числу покупателей в первые 30s:
+# 3-50 buyers_in_60s: WR=1-20% (средняя ажиотажная зона — ловушка)
+# <3 buyers: WR=31.3% или >50 buyers: WR=39-40% → держим
+# На практике к T+25s видим ~половину от 60s → зона [3..50] → проверяем на MOMENTUM_GATE
+BUYER_DEAD_ZONE_MIN  = int(os.getenv("BUYER_DEAD_ZONE_MIN", "3"))
+BUYER_DEAD_ZONE_MAX  = int(os.getenv("BUYER_DEAD_ZONE_MAX", "50"))
+
 # ── Исполнение ──────────────────────────────────────────────────────────────
 PRIORITY_FEE_MICROLAMPORTS = int(os.getenv("PRIORITY_FEE_MICROLAMPORTS", "500000"))
 SLIPPAGE_BPS         = int(os.getenv("SLIPPAGE_BPS", "1000"))  # 10% — pump.fun быстро двигается
@@ -352,6 +366,14 @@ class BotState:
         self.signals_entered:  int  = 0
         self.signals_skipped:  int  = 0   # пропущено (max_positions)
         self.reentries:        int  = 0
+
+        # Статистика фильтров (из token_signals анализа)
+        self.filtered_dev_buy:   int = 0  # пропущено из-за dev buy 0.5+ SOL
+        self.filtered_dead_zone: int = 0  # выходы из-за buyer dead zone на MOMENTUM_GATE
+
+        # Счётчик buy-событий по минту (для dead zone detection)
+        # ключ: mint, значение: кол-во buy-ивентов с WebSocket с момента открытия
+        self.mint_buy_count: dict[str, int] = defaultdict(int)
 
         # История сделок для экспорта
         self.trade_log:   list[TradeRecord] = []
@@ -774,18 +796,31 @@ async def manage_positions(session: aiohttp.ClientSession):
 
         # ── T+25s MOMENTUM_GATE: рост < 5% = нет momentum ──────────────────
         # Данные: второй кластер выходов ~4,000 на 25-45s
+        # + buyer dead zone: 3-50 покупателей в первые 30s → WR=1-20% (ловушка!)
         if pos.quick_stop_done and not pos.momentum_done and age_sec >= MOMENTUM_GATE_SEC:
             insufficient = price is None or pnl_pct is None or pnl_pct < MOMENTUM_MIN_PCT
-            if insufficient:
+
+            # Dead zone check: счётчик buy-событий по WebSocket
+            # <3 buyers: WR=31% ✅  |  3-50: WR=1-20% ❌  |  >50: WR=39% ✅
+            buy_count = state.mint_buy_count.get(mint, 0)
+            in_dead_zone = BUYER_DEAD_ZONE_MIN <= buy_count <= BUYER_DEAD_ZONE_MAX
+
+            if insufficient or in_dead_zone:
                 close_price = price if price else pos.entry_price
-                reason = f"MOMENTUM_GATE_{MOMENTUM_GATE_SEC}s [<{MOMENTUM_MIN_PCT:.0%}]"
+                reason_parts = []
+                if insufficient:
+                    reason_parts.append(f"<{MOMENTUM_MIN_PCT:.0%}")
+                if in_dead_zone:
+                    reason_parts.append(f"dead_zone_{buy_count}buyers")
+                    state.filtered_dead_zone += 1
+                reason = f"MOMENTUM_GATE_{MOMENTUM_GATE_SEC}s [{'+'.join(reason_parts)}]"
                 await close_position(pos, 1.0, reason, close_price, session)
                 pos.exit_reason = reason
                 to_remove.append(mint)
                 _record_closed(pos, close_price)
                 continue
             else:
-                pos.momentum_done = True    # прошли momentum gate → держим!
+                pos.momentum_done = True    # прошли оба gate → держим!
 
         # Без цены дальше ничего не делаем (ждём данных)
         if price is None or pnl_pct is None:
@@ -915,8 +950,10 @@ async def check_reentries(session: aiohttp.ClientSession):
 async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
     """
     Немедленная покупка токена при получении события создания.
-    nya666 не использует watch window или score — скорость важнее отбора.
-    Checkpoints (T+8s, T+25s) режут мёртвые позиции уже после входа.
+    Применяем фильтры на основе анализа 25,987 реальных сделок:
+      - Dev buy 0.5+ SOL: WR=16.3% → пропускаем
+      - Co-buy (оба кошелька): WR=63.7% → берём с увеличенным размером (TODO)
+    Checkpoints (T+8s, T+25s + dead zone) режут плохие позиции после входа.
     """
     mint = event.mint
 
@@ -927,6 +964,17 @@ async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
 
     age = time.time() - event.created_at
     if age > MAX_TOKEN_AGE_SEC:
+        return
+
+    # ── Фильтр по dev buy (из анализа token_signals) ────────────────────────
+    # Dev buy >= DEV_BUY_SKIP_MIN_SOL: WR=16.3%, avg_pnl=-0.009 → пропускаем
+    # Dev buy = нет / <0.5 SOL: WR=32.2% → нормально
+    dev_sol = event.dev_buy_sol or 0.0
+    if dev_sol >= DEV_BUY_SKIP_MIN_SOL:
+        state.signals_skipped += 1
+        state.filtered_dev_buy += 1
+        log.debug("⛔ %s: dev_buy=%.2f SOL (≥%.1f) → пропуск [WR=16%%]",
+                  event.symbol, dev_sol, DEV_BUY_SKIP_MIN_SOL)
         return
 
     if not state.can_open():
@@ -1013,7 +1061,7 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                             asyncio.ensure_future(_buy_token(event, session))
 
                         else:
-                            # Торговое событие — обновляем цену И данные для score
+                            # Торговое событие — обновляем цену + считаем покупателей
                             sol_amount   = msg.get("solAmount") or msg.get("vSolInBondingCurve") or 0
                             token_amount = msg.get("tokenAmount") or msg.get("vTokensInBondingCurve") or 0
                             is_buy       = msg.get("txType") == "buy"
@@ -1021,6 +1069,11 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
 
                             if sol_amount and token_amount:
                                 update_price_from_trade(mint, sol_amount, token_amount, is_buy)
+
+                            # Считаем buy-события для dead zone detection на MOMENTUM_GATE
+                            # Данные: 3-50 buyers в первые 60s → WR=1-20% (зона смерти)
+                            if is_buy and mint in state.positions:
+                                state.mint_buy_count[mint] += 1
 
         except websockets.ConnectionClosed:
             log.warning("WS закрыт, переподключение через 3s...")
@@ -1110,8 +1163,10 @@ async def status_logger():
                  "DRY RUN 🟡" if DRY_RUN else "LIVE 🟢")
         log.info("  Банк: %.4f SOL  |  Позиций: %d/%d  |  Цен в кэше: %d",
                  state.bank, len(state.positions), MAX_POSITIONS, len(_price_cache))
-        log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d",
-                 state.signals_received, state.signals_entered, state.signals_skipped)
+        log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d  "
+                 "(dev_buy: %d  dead_zone: %d)",
+                 state.signals_received, state.signals_entered, state.signals_skipped,
+                 state.filtered_dev_buy, state.filtered_dead_zone)
         log.info("  Сделок: %d  |  Wins: %d  |  WR: %.1f%%  |  PnL: %+.4f SOL",
                  state.session_trades, state.session_wins,
                  state.win_rate, state.session_pnl)

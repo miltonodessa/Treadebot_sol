@@ -77,15 +77,35 @@ def load_trades() -> pd.DataFrame:
 
 
 def load_token_signals() -> dict:
-    """Загрузить token_signals.json (может быть пустым/sparse)."""
-    if not Path(TOKEN_SIGNALS).exists():
-        return {}
-    with open(TOKEN_SIGNALS, encoding="utf-8") as f:
-        data = json.load(f)
-    # Поддержка как list, так и dict
-    if isinstance(data, list):
-        return {item["mint"]: item for item in data if "mint" in item}
-    return data
+    """Загрузить token_signals файлы (поддержка _1/_2 и основного файла)."""
+    result: dict = {}
+    # Приоритет: token_signals_1.json, token_signals_2.json, token_signals.json
+    candidates = [
+        TOKEN_SIGNALS,
+        TOKEN_SIGNALS.replace(".json", "_1.json"),
+        TOKEN_SIGNALS.replace(".json", "_2.json"),
+    ]
+    for fname in candidates:
+        if not Path(fname).exists():
+            continue
+        try:
+            with open(fname, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                for item in data:
+                    if "mint" in item:
+                        existing = result.get(item["mint"], {})
+                        existing.update(item)
+                        result[item["mint"]] = existing
+            elif isinstance(data, dict):
+                for mint, item in data.items():
+                    existing = result.get(mint, {})
+                    existing.update(item)
+                    result[mint] = existing
+            print(f"[trainer] Загружен {fname}: +{len(result)} минтов")
+        except Exception as e:
+            print(f"[trainer] Ошибка загрузки {fname}: {e}")
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -116,25 +136,50 @@ def build_features(df: pd.DataFrame, signals: dict) -> pd.DataFrame:
     # Mcap buckets (логарифм лучше работает с деревьями)
     df["log_entry_mcap"] = np.log1p(df["entry_mcap_sol"].clip(0))
 
-    # Обогащение из token_signals (если есть)
+    # Обогащение из token_signals (полная схема из token_signals_1/2.json)
     if signals:
         def _get(mint, key, default=0.0):
-            entry = signals.get(mint, {})
-            return entry.get(key, default)
+            return signals.get(mint, {}).get(key, default)
+        def _getb(mint, key):
+            return int(bool(signals.get(mint, {}).get(key, False)))
 
-        df["sig_bc_sol"]          = df["mint"].apply(lambda m: _get(m, "nya666_first_buy_bc_sol"))
-        df["sig_first_buy_sol"]   = df["mint"].apply(lambda m: _get(m, "nya666_first_buy_sol"))
-        df["sig_n_buys"]          = df["mint"].apply(lambda m: _get(m, "nya666_n_buys"))
-        df["has_signals"]         = (df["sig_bc_sol"] > 0).astype(int)
+        # Данные о входе кошелька
+        df["sig_bc_sol"]          = df["mint"].apply(lambda m: _get(m, "first_buy_bc_sol"))
+        df["sig_first_buy_sol"]   = df["mint"].apply(lambda m: _get(m, "first_buy_sol"))
+        df["sig_n_buys"]          = df["mint"].apply(lambda m: _get(m, "n_buys"))
+        df["log_sig_bc_sol"]      = np.log1p(df["sig_bc_sol"].clip(0))
 
-        # Расширенные поля (появятся когда parser обогатит данные)
+        # Dev buy — ключевой сигнал: 0.5-2 SOL = WR 16.3%
         df["dev_buy_sol"]         = df["mint"].apply(lambda m: _get(m, "dev_buy_sol"))
-        df["early_buyers"]        = df["mint"].apply(lambda m: _get(m, "early_buyers_count"))
-        df["buyers_before_me"]    = df["mint"].apply(lambda m: _get(m, "buyers_before_me"))
-        df["co_buy"]              = df["mint"].apply(lambda m: int(_get(m, "co_buy_signal", False)))
-        df["has_twitter"]         = df["mint"].apply(lambda m: int(_get(m, "has_twitter", False)))
-        df["has_website"]         = df["mint"].apply(lambda m: int(_get(m, "has_website", False)))
-        df["creation_age_sec"]    = df["mint"].apply(lambda m: _get(m, "entry_speed_sec"))
+        df["dev_buy_bad"]         = ((df["dev_buy_sol"] >= 0.5)).astype(int)
+
+        # Покупатели — сильнейший сигнал: buyers_before<=1 = WR 52%
+        df["buyers_before_me"]    = df["mint"].apply(lambda m: _get(m, "n_buyers_before_wallet"))
+        df["is_first_buyer"]      = (df["buyers_before_me"] <= 1).astype(int)
+        df["log_buyers_before"]   = np.log1p(df["buyers_before_me"].clip(0))
+
+        # Активность в первые 60s
+        df["n_buyers_60s"]        = df["mint"].apply(lambda m: _get(m, "n_buyers_in_60s"))
+        df["buy_pressure_60s"]    = df["mint"].apply(lambda m: _get(m, "buy_pressure_sol_60s"))
+        # Dead zone flag: 3-50 buyers = WR 1-20%
+        df["in_dead_zone"]        = (
+            (df["n_buyers_60s"] >= 3) & (df["n_buyers_60s"] <= 50)
+        ).astype(int)
+        df["high_activity"]       = (df["n_buyers_60s"] > 50).astype(int)
+
+        # Co-buy (обе кошелька) — WR 63.7% когда buyers_before<=1
+        df["is_co_buy"]           = df["mint"].apply(lambda m: _getb(m, "is_co_buy"))
+
+        # Создание токена
+        df["n_transfers_create"]  = df["mint"].apply(lambda m: _get(m, "n_token_transfers_at_create"))
+        df["entry_speed_sec"]     = df["mint"].apply(lambda m: _get(m, "seconds_after_creation"))
+
+        # Социальные сети (слабый сигнал, но добавляем)
+        df["has_twitter"]         = df["mint"].apply(lambda m: _getb(m, "has_twitter"))
+        df["has_website"]         = df["mint"].apply(lambda m: _getb(m, "has_website"))
+        df["has_telegram"]        = df["mint"].apply(lambda m: _getb(m, "has_telegram"))
+
+        df["has_signals"]         = (df["sig_bc_sol"] > 0).astype(int)
 
     return df
 
@@ -233,9 +278,21 @@ def train_model(df: pd.DataFrame, signals: dict) -> tuple:
     # Набор признаков (берём только реально заполненные)
     base_features = ["log_entry_mcap", "is_reentry", "hour_utc", "dow"]
     signal_features = [
-        "sig_bc_sol", "sig_n_buys", "dev_buy_sol",
-        "early_buyers", "buyers_before_me", "co_buy",
-        "has_twitter", "has_website", "creation_age_sec",
+        # Покупатели — главные сигналы из анализа 25,987 сделок
+        "is_first_buyer", "log_buyers_before", "buyers_before_me",
+        "in_dead_zone", "high_activity", "n_buyers_60s",
+        # Dev buy
+        "dev_buy_sol", "dev_buy_bad",
+        # BC и давление
+        "log_sig_bc_sol", "sig_bc_sol", "buy_pressure_60s",
+        # Co-buy: WR 63.7%
+        "is_co_buy",
+        # Создание
+        "n_transfers_create", "entry_speed_sec",
+        # Социальные
+        "has_twitter", "has_website", "has_telegram",
+        # Дополнительно
+        "sig_n_buys",
     ]
     available = [c for c in base_features + signal_features if c in df.columns]
 
