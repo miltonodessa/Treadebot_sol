@@ -352,7 +352,7 @@ async def fetch_early_buyers(
 
 async def fetch_token_metadata(session: aiohttp.ClientSession, mint: str) -> dict:
     """Метаданные через Helius DAS API (getAsset)."""
-    result = await _rpc_call(session, "getAsset", [{"id": mint}])
+    result = await _rpc_call(session, "getAsset", [mint])
     if not result:
         return {}
     try:
