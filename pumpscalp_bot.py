@@ -83,6 +83,7 @@ PUMP_TOTAL_SUPPLY    = 1_000_000_000   # 1B токенов у всех pump.fun 
 
 # ── Размер позиции (медиана из данных: 0.265 SOL) ───────────────────────────
 BUY_SIZE_SOL         = float(os.getenv("BUY_SIZE_SOL", "0.5"))
+BUY_SIZE_REENTRY_SOL = float(os.getenv("BUY_SIZE_REENTRY_SOL", str(BUY_SIZE_SOL * 0.6)))
 MAX_POSITIONS        = int(os.getenv("MAX_POSITIONS", "10"))
 
 # ── Watch window перед покупкой ───────────────────────────────────────────────
