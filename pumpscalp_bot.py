@@ -146,20 +146,24 @@ TP2_SELL_FRAC        = float(os.getenv("TP2_SELL_FRAC", "0.50"))
 TP3_PCT              = float(os.getenv("TP3_PCT", "5.00"))
 TP3_SELL_FRAC        = float(os.getenv("TP3_SELL_FRAC", "1.00"))
 
-# ── Momentum checkpoints (D5dtjf стратегия) ──────────────────────────────────
+# ── Momentum checkpoints ───────────────────────────────────────────────────────
 # T+10s QUICK_STOP: если цена не выросла → токен мёртвый
 QUICK_STOP_SEC       = int(os.getenv("QUICK_STOP_SEC", "10"))
-# T+60s MOMENTUM_GATE: КЛЮЧЕВОЙ ФИЛЬТР
-# ══ КРИТИЧЕСКАЯ НАХОДКА из 34,399 сделок nya666 ══
-# nb60=91-95: РЕАЛЬНЫЕ значения, WR=0%!! → это мертвые токены
-# nb60=96:    SENTINEL "96+" (14,612 сделок) WR=49.0%, AvgPnL=+0.086 SOL ← ЗЕЛЁНАЯ ЗОНА
-# nb60=97:    WR=37.5%, AvgPnL=+0.001 (уже хуже!)
-# nb60=98-99: WR=33-35%, AvgPnL ОТРИЦАТЕЛЬНЫЙ
-# Вывод: порог 91 был НЕПРАВИЛЬНЫМ, нужно 96 (sentinel "96+")
-# D5dtjf подтверждает: nb60=96 = 6,931 сделок vs 51-59 у 91-95
+# T+60s MOMENTUM_GATE: POST-BUY проверка температуры токена
+# ВАЖНО: это НЕ "подождать пока 96 человек купят до нас"!
+# Бот покупает ПЕРВЫМ (при создании). Затем 60 секунд считаем покупателей.
+# Это мера популярности токена ПОСЛЕ нашей покупки:
+#   nb60=96: SENTINEL "96+" — горячий токен
+#     nya666: nbw=0 + nb60=96 → WR=49%, AvgPnL=+0.086 SOL ← ДЕРЖИМ
+#     nya666: nbw>0 + nb60=96 → WR=19.6%, AvgPnL=-0.034   ← убыток (мы не копируем это)
+#   nb60<96: холодный токен → WR=0-26%, уходим с минимальным убытком
+#   nb60=91-95: реальные маленькие значения (не sentinel!) WR=14.7% → ВЫХОД
+#   nb60=97-100: WR=32%, часто AvgPnL<0 (парадоксально — "перегрев" = поздно)
+# nya666 покупает с nbw=5-12 в 32% сделок → WR=10-15% → это его плохие сделки!
+# Бот берёт только лучшее: первым + горячий токен (nb60=96)
 MOMENTUM_GATE_SEC    = int(os.getenv("MOMENTUM_GATE_SEC", "60"))
-MOMENTUM_MIN_PCT     = float(os.getenv("MOMENTUM_MIN_PCT", "0.0"))   # любой рост OK
-BUYERS_60S_MIN       = int(os.getenv("BUYERS_60S_MIN", "96"))        # 91→96 sentinel!
+MOMENTUM_MIN_PCT     = float(os.getenv("MOMENTUM_MIN_PCT", "0.0"))
+BUYERS_60S_MIN       = int(os.getenv("BUYERS_60S_MIN", "96"))        # sentinel "96+"
 
 # Trailing: после +50% → SL подтягивается в -12% от пика (D5dtjf тighter exits)
 TRAILING_TRIGGER_PCT = float(os.getenv("TRAILING_TRIGGER_PCT", "0.50"))
