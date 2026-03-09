@@ -1555,10 +1555,11 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                         continue
 
                     # ── Новый токен (create event) ──────────────────────────
+                    # ВАЖНО: bondingCurveKey присутствует и в create И в buy/sell событиях
+                    # → использовать только newTokenAccount (уникален для create) или txType
                     is_new = (
-                        msg.get("newTokenAccount") is not None
-                        or msg.get("bondingCurveKey") is not None
-                        or msg.get("txType") == "create"
+                        msg.get("txType") == "create"
+                        or msg.get("newTokenAccount") is not None
                     )
 
                     if is_new:
