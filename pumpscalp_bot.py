@@ -1287,19 +1287,33 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                             )
 
                             if PREENTRY_BUYERS_MIN > 0:
-                                # Pre-entry: наблюдаем, не покупаем сразу
-                                # Подписываемся на трейды токена чтобы считать покупателей
-                                state.watching_tokens[mint] = {
-                                    'event':   event,
-                                    'buyers':  0,
-                                    'started': time.time(),
-                                }
-                                await ws.send(json.dumps({
-                                    "method": "subscribeTokenTrade",
-                                    "keys":   [mint],
-                                }))
-                                log.debug("👁 watching %s (ждём ≥%d покупателей за %ds)",
-                                          event.symbol, PREENTRY_BUYERS_MIN, PREENTRY_WAIT_SEC)
+                                # Pre-entry: быстрые фильтры ДО подписки
+                                # (не тратим subscribeTokenTrade на заведомо плохие токены)
+                                _skip = False
+                                if AVOID_HOURS_UTC:
+                                    if datetime.now(timezone.utc).hour in AVOID_HOURS_UTC:
+                                        _skip = True
+                                if not _skip and SKIP_MAYHEM_MODE and is_mayhem:
+                                    _skip = True
+                                if not _skip and SKIP_N_TRANSFERS_1 and n_transfers == 1:
+                                    _skip = True
+                                if _skip:
+                                    state.signals_skipped += 1
+                                    log.debug("⛔ pre-filter %s → пропуск до watching",
+                                              event.symbol)
+                                else:
+                                    # Подписываемся на трейды токена чтобы считать покупателей
+                                    state.watching_tokens[mint] = {
+                                        'event':   event,
+                                        'buyers':  0,
+                                        'started': time.time(),
+                                    }
+                                    await ws.send(json.dumps({
+                                        "method": "subscribeTokenTrade",
+                                        "keys":   [mint],
+                                    }))
+                                    log.debug("👁 watching %s (ждём ≥%d покупателей за %ds)",
+                                              event.symbol, PREENTRY_BUYERS_MIN, PREENTRY_WAIT_SEC)
                             else:
                                 # Старое поведение: мгновенная покупка (не рекомендуется)
                                 asyncio.ensure_future(_buy_token(event, session))
