@@ -1,0 +1,265 @@
+{
+  "session_start": "20260309_180031",
+  "trades_total": 349,
+  "win_rate_pct": 0.3,
+  "pnl_total_sol": -1.5983,
+  "avg_pnl_sol": -0.0046,
+  "avg_win_sol": 0.0288,
+  "avg_loss_sol": -0.0047,
+  "avg_hold_sec": 9.1,
+  "avg_entry_mcap_sol": 31.47,
+  "avg_exit_mcap_sol": 31.41,
+  "reentries": 0,
+  "by_exit_reason": {
+    "MOMENTUM_GATE_25s": {
+      "count": 1,
+      "pnl": 0.028846,
+      "wins": 1,
+      "wr_pct": 100.0
+    },
+    "QUICK_STOP_8s": {
+      "count": 348,
+      "pnl": -1.6271190000000049,
+      "wins": 0,
+      "wr_pct": 0.0
+    }
+  },
+  "by_phase": {
+    "quick_stop_phase": {
+      "count": 348,
+      "pnl": -1.6271190000000049,
+      "wins": 0,
+      "wr_pct": 0.0
+    },
+    "momentum_phase": {
+      "count": 1,
+      "pnl": 0.028846,
+      "wins": 1,
+      "wr_pct": 100.0
+    },
+    "active_phase": {
+      "count": 0,
+      "pnl": 0.0,
+      "wins": 0,
+      "wr_pct": 0
+    }
+  },
+  "by_entry_mcap": {
+    "20-100_SOL": {
+      "count": 347,
+      "pnl": -1.5902630000000046,
+      "wins": 1,
+      "wr_pct": 0.3
+    },
+    "<5_SOL": {
+      "count": 2,
+      "pnl": -0.00801,
+      "wins": 0,
+      "wr_pct": 0.0
+    }
+  },
+  "top10_wins": [
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": 0.028846,
+      "pnl_pct": 9.62,
+      "hold_sec": 26.0,
+      "reason": "MOMENTUM_GATE_25s [buyers_3<96]",
+      "entry_mcap_sol": 36.6063,
+      "exit_mcap_sol": 40.6553,
+      "url": "https://gmgn.ai/sol/token/9CwRA8bqCtZbXRGKSXZq5t9KKJPx8JME2fmDdssBpump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 8.8,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 32.1717,
+      "exit_mcap_sol": 32.1717,
+      "url": "https://gmgn.ai/sol/token/4VxZXPDNQYwQADN9EX3wCQ9tRy7DjLsmNor4qYrypump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 8.9,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 32.3232,
+      "exit_mcap_sol": 32.3232,
+      "url": "https://gmgn.ai/sol/token/4RR7PTVLfoBGytp3QoS1D7QpbqkDjDVixXHTeL13pump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 9.0,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 33.3333,
+      "exit_mcap_sol": 33.3333,
+      "url": "https://gmgn.ai/sol/token/tth3vp54RKffvwJZY8UxF3CRTjJKBqpKMJgtNBrkmHP"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 8.2,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 33.3333,
+      "exit_mcap_sol": 33.3333,
+      "url": "https://gmgn.ai/sol/token/4SzKMaKVwnXQgRQoc8rAPjxkQ3dT44Yzhs4S5iQrpump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 8.3,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 32.1717,
+      "exit_mcap_sol": 32.1717,
+      "url": "https://gmgn.ai/sol/token/4bay7YDruEHn6hX321E167ajKEKqxwdGen347Ubwpump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 10.0,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 35.2424,
+      "exit_mcap_sol": 35.2424,
+      "url": "https://gmgn.ai/sol/token/B44fkumHYEWa1Rz3D82h4H4toW6vkCZSeb45bc28pump"
+    },
+    {
+      "symbol": "SPOIL",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 8.8,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 30.5026,
+      "exit_mcap_sol": 30.5026,
+      "url": "https://gmgn.ai/sol/token/APr6qmLtM983Dk7Sa5b9EYjNf7gXCeKkyBuXKDAGpump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.34,
+      "hold_sec": 8.0,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 30.4527,
+      "exit_mcap_sol": 30.4527,
+      "url": "https://gmgn.ai/sol/token/2qjgVn8XURSdTW4bbgUF4vWSp8i2EadehL4E1aGRpump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.004005,
+      "pnl_pct": -1.33,
+      "hold_sec": 8.0,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 33.2959,
+      "exit_mcap_sol": 33.2959,
+      "url": "https://gmgn.ai/sol/token/4j9tzCQRqBQAg1if99T45JdefdgxdCHNQfsafXnfpump"
+    }
+  ],
+  "top10_losses": [
+    {
+      "symbol": "MONKEY",
+      "pnl_sol": -0.014764,
+      "pnl_pct": -4.92,
+      "hold_sec": 9.1,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 35.2912,
+      "exit_mcap_sol": 34.0127,
+      "url": "https://gmgn.ai/sol/token/WZQ5ZEQ9eF7Zbyf1eh28M6q88iuwZVnvk8WtVmepump"
+    },
+    {
+      "symbol": "Benjamin",
+      "pnl_sol": -0.011418,
+      "pnl_pct": -3.81,
+      "hold_sec": 8.3,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 31.3499,
+      "exit_mcap_sol": 30.5675,
+      "url": "https://gmgn.ai/sol/token/BXDERzPgCy6LxeUdWtRcbg7tTD4B3v8p9LqucaYVpump"
+    },
+    {
+      "symbol": "WOJAP",
+      "pnl_sol": -0.00825,
+      "pnl_pct": -2.75,
+      "hold_sec": 8.1,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 28.6489,
+      "exit_mcap_sol": 28.2394,
+      "url": "https://gmgn.ai/sol/token/54HNKZ4afMKqM75YFTUYyPRmq8W1fFK3suhfa93hpump"
+    },
+    {
+      "symbol": "JOE",
+      "pnl_sol": -0.007067,
+      "pnl_pct": -2.36,
+      "hold_sec": 9.1,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 28.2537,
+      "exit_mcap_sol": 27.9625,
+      "url": "https://gmgn.ai/sol/token/8tfdjB2FtDxyWH9Y74nLDSiHxRVoiQT2UBNhBsKsWAt1"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.006975,
+      "pnl_pct": -2.33,
+      "hold_sec": 9.2,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 31.0307,
+      "exit_mcap_sol": 30.7204,
+      "url": "https://gmgn.ai/sol/token/2ANZxmAprktvPh6toAHbhXpdpUqDiBy7FDMYnsULpump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.006975,
+      "pnl_pct": -2.33,
+      "hold_sec": 8.5,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 28.7121,
+      "exit_mcap_sol": 28.425,
+      "url": "https://gmgn.ai/sol/token/6fyWBPXFLz6FNjucAhf29bJS5AfENqNJhgYM8HeBpump"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.006975,
+      "pnl_pct": -2.33,
+      "hold_sec": 8.4,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 36.6092,
+      "exit_mcap_sol": 36.2431,
+      "url": "https://gmgn.ai/sol/token/DEbSy4NNCmtN2jx3jYufLE8itXjqXMGbf3S7JKNyeP45"
+    },
+    {
+      "symbol": "Heliopolis",
+      "pnl_sol": -0.006975,
+      "pnl_pct": -2.33,
+      "hold_sec": 9.0,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 28.3219,
+      "exit_mcap_sol": 28.0386,
+      "url": "https://gmgn.ai/sol/token/76KEDKAGHxjTr7RHXwDqfmDiinJFGLFPJsGaLB3zpump"
+    },
+    {
+      "symbol": "PROMPTFOO",
+      "pnl_sol": -0.006975,
+      "pnl_pct": -2.33,
+      "hold_sec": 9.3,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 28.4297,
+      "exit_mcap_sol": 28.1454,
+      "url": "https://gmgn.ai/sol/token/CEkTFkkDmS9ZCAy7EaSYELj45o8bLtzroYV8pD6Bpump"
+    },
+    {
+      "symbol": "PROMPTFOO",
+      "pnl_sol": -0.006975,
+      "pnl_pct": -2.33,
+      "hold_sec": 9.3,
+      "reason": "QUICK_STOP_8s",
+      "entry_mcap_sol": 28.4297,
+      "exit_mcap_sol": 28.1454,
+      "url": "https://gmgn.ai/sol/token/5DGWzhzQU8Fs7qqUFp6RMY97G66auVYLRP8xCLjVpump"
+    }
+  ]
+}
