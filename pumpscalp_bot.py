@@ -77,7 +77,7 @@ import os
 import ssl
 import time
 from base64 import b64decode, b64encode
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -154,6 +154,17 @@ TP3_SELL_FRAC        = float(os.getenv("TP3_SELL_FRAC", "1.00"))
 # 5 = входим только в "горячие" токены (≥5 покупателей за 15 секунд)
 PREENTRY_BUYERS_MIN  = int(os.getenv("PREENTRY_BUYERS_MIN", "5"))
 PREENTRY_WAIT_SEC    = int(os.getenv("PREENTRY_WAIT_SEC", "15"))
+
+# ── Strategy 2: Sympathy Play ─────────────────────────────────────────────────
+# Паттерн: когда токен X pumps, ищем старые токены с тем же именем — они тоже pumps
+# Сигнал: ≥SYMPATHY_PUMP_BUYERS покупателей за SYMPATHY_PUMP_WINDOW_SEC секунд
+SYMPATHY_ENABLED          = bool(int(os.getenv("SYMPATHY_ENABLED", "1")))
+SYMPATHY_MAX_POSITIONS    = int(os.getenv("SYMPATHY_MAX_POSITIONS", "2"))
+SYMPATHY_BUY_SIZE_SOL     = float(os.getenv("SYMPATHY_BUY_SIZE_SOL", str(
+    float(os.getenv("BUY_SIZE_SOL", "0.10")))))
+SYMPATHY_PUMP_BUYERS      = int(os.getenv("SYMPATHY_PUMP_BUYERS", "15"))   # порог pump
+SYMPATHY_PUMP_WINDOW_SEC  = int(os.getenv("SYMPATHY_PUMP_WINDOW_SEC", "30"))
+SYMPATHY_MIN_AGE_DIFF_SEC = int(os.getenv("SYMPATHY_MIN_AGE_DIFF_SEC", "60"))  # таргет старше триггера на X сек
 
 # ── Momentum checkpoints ───────────────────────────────────────────────────────
 # T+10s QUICK_STOP: если цена не выросла → токен мёртвый
@@ -427,6 +438,9 @@ class Position:
     # Капитализация при входе (SOL = price × 1B)
     entry_mcap_sol: float = 0.0
 
+    # К какой стратегии относится позиция
+    strategy_name: str = "new_token"
+
 
 @dataclass
 class MintHistory:
@@ -525,6 +539,318 @@ class BotState:
 
 
 state = BotState()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MULTI-STRATEGY ARCHITECTURE
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  StrategyRunner ─┬─ NewTokenStrategy   (первый вход + pre-entry)
+#                  └─ SympathyStrategy   (pump → copycat старых токенов)
+#
+#  Добавить новую стратегию: унаследовать Strategy, вызвать runner.register()
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class Strategy:
+    """
+    Базовый класс для всех стратегий.
+    Каждая стратегия:
+      - получает события on_create / on_trade от StrategyRunner
+      - управляет своими позициями (subset state.positions)
+      - запрашивает WS-подписки через self.subscribe(mint)
+    """
+    name: str = "base"
+    max_positions: int = 1
+    buy_size_sol: float = 0.1
+
+    def __init__(self):
+        self._runner:  Optional["StrategyRunner"] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        # Per-strategy stats
+        self.n_entered = 0
+        self.n_trades  = 0
+        self.n_wins    = 0
+        self.n_skipped = 0
+        self.pnl       = 0.0
+
+    def my_positions(self) -> dict:
+        """Позиции, открытые этой стратегией."""
+        return {m: p for m, p in state.positions.items()
+                if p.strategy_name == self.name}
+
+    def can_open(self) -> bool:
+        return (state.can_open() and
+                len(self.my_positions()) < self.max_positions)
+
+    async def subscribe(self, mint: str):
+        """Запросить WebSocket-подписку на трейды токена (с дедупликацией)."""
+        if self._runner:
+            await self._runner.subscribe(mint)
+
+    async def on_create(self, event: "TokenEvent") -> None:
+        pass
+
+    async def on_trade(self, mint: str, msg: dict) -> None:
+        pass
+
+    async def periodic(self) -> None:
+        pass
+
+
+class StrategyRunner:
+    """
+    Диспетчер событий: принимает WS-сообщения → рассылает всем стратегиям.
+    Управляет WS-подписками (дедупликация между стратегиями).
+    """
+    def __init__(self):
+        self.strategies: list[Strategy] = []
+        self._subscribed: set[str] = set()   # mints, subscribed на основном WS
+        self._ws = None
+
+    def register(self, strategy: Strategy) -> "StrategyRunner":
+        strategy._runner = self
+        self.strategies.append(strategy)
+        return self
+
+    def attach(self, ws, session):
+        """Вызывать при каждом новом WS-соединении."""
+        self._ws = ws
+        self._subscribed.clear()
+        for s in self.strategies:
+            s._session = session
+
+    async def subscribe(self, mint: str) -> bool:
+        """Подписаться на торги токена (одна подписка на весь runner)."""
+        if mint not in self._subscribed:
+            self._subscribed.add(mint)
+            await self._ws.send(json.dumps({
+                "method": "subscribeTokenTrade",
+                "keys":   [mint],
+            }))
+            return True
+        return False
+
+    async def on_create(self, event: "TokenEvent"):
+        for s in self.strategies:
+            try:
+                await s.on_create(event)
+            except Exception as e:
+                log.error("[%s] on_create error: %s", s.name, e)
+
+    async def on_trade(self, mint: str, msg: dict):
+        for s in self.strategies:
+            try:
+                await s.on_trade(mint, msg)
+            except Exception as e:
+                log.error("[%s] on_trade error: %s", s.name, e)
+
+    async def periodic(self):
+        for s in self.strategies:
+            try:
+                await s.periodic()
+            except Exception as e:
+                log.error("[%s] periodic error: %s", s.name, e)
+
+
+# ─── Strategy 1: New Token ────────────────────────────────────────────────────
+
+class NewTokenStrategy(Strategy):
+    """
+    Текущая стратегия: покупаем новые pump.fun токены.
+    Pre-entry: ждём ≥PREENTRY_BUYERS_MIN покупателей за PREENTRY_WAIT_SEC сек.
+    """
+    name = "new_token"
+
+    def __init__(self):
+        super().__init__()
+        self.max_positions = MAX_POSITIONS
+        self.buy_size_sol  = BUY_SIZE_SOL
+        # Pre-entry: токены на наблюдении
+        # mint → {'event': TokenEvent, 'buyers': int, 'started': float}
+        self.watching: dict[str, dict] = {}
+        self.n_expired = 0
+        # Filter counters
+        self.f_hours = self.f_mayhem = self.f_ntrans = 0
+
+    async def on_create(self, event: "TokenEvent") -> None:
+        state.signals_received += 1
+
+        if PREENTRY_BUYERS_MIN > 0:
+            # Быстрые фильтры ДО подписки
+            if AVOID_HOURS_UTC and datetime.now(timezone.utc).hour in AVOID_HOURS_UTC:
+                state.signals_skipped += 1
+                self.f_hours += 1
+                return
+            if SKIP_MAYHEM_MODE and event.is_mayhem:
+                state.signals_skipped += 1
+                self.f_mayhem += 1
+                return
+            if SKIP_N_TRANSFERS_1 and event.n_transfers == 1:
+                state.signals_skipped += 1
+                self.f_ntrans += 1
+                return
+
+            self.watching[event.mint] = {
+                'event':   event,
+                'buyers':  0,
+                'started': time.time(),
+            }
+            await self.subscribe(event.mint)
+            log.debug("👁 watching %s (ждём ≥%d buyers за %ds)",
+                      event.symbol, PREENTRY_BUYERS_MIN, PREENTRY_WAIT_SEC)
+        else:
+            asyncio.ensure_future(_buy_token(event, self._session))
+
+    async def on_trade(self, mint: str, msg: dict) -> None:
+        is_buy = msg.get("txType") == "buy"
+
+        # ── Pre-entry счётчик ───────────────────────────────────────────────
+        if is_buy and mint in self.watching:
+            w = self.watching[mint]
+            w['buyers'] += 1
+            log.debug("👁 %s: %d buyers (порог %d)",
+                      w['event'].symbol, w['buyers'], PREENTRY_BUYERS_MIN)
+            if w['buyers'] >= PREENTRY_BUYERS_MIN:
+                log.info("🔥 %s: %d buyers за %.0fs → ВХОДИМ!",
+                         w['event'].symbol, w['buyers'],
+                         time.time() - w['started'])
+                asyncio.ensure_future(_buy_token(w['event'], self._session))
+                del self.watching[mint]
+
+        # ── MOMENTUM_GATE счётчик (post-buy) ────────────────────────────────
+        if is_buy and mint in state.positions:
+            open_t = state.mint_open_time.get(mint, 0)
+            if open_t and (time.time() - open_t) <= MOMENTUM_GATE_SEC:
+                state.mint_buy_count[mint] += 1
+
+    async def periodic(self) -> None:
+        """Истекаем watching-токены, не набравшие buyers за таймаут."""
+        now = time.time()
+        expired = [m for m, w in list(self.watching.items())
+                   if now - w['started'] > PREENTRY_WAIT_SEC]
+        for m in expired:
+            w = self.watching.pop(m, None)
+            if w:
+                self.n_expired += 1
+                state.signals_expired += 1
+                log.debug("⏰ %s: истёк %ds (%d/%d buyers)",
+                          w['event'].symbol, PREENTRY_WAIT_SEC,
+                          w['buyers'], PREENTRY_BUYERS_MIN)
+
+
+# ─── Strategy 2: Sympathy Play ────────────────────────────────────────────────
+
+class SympathyStrategy(Strategy):
+    """
+    Sympathy play: когда токен X резко pumps (много buyers быстро),
+    ищем СТАРЫЕ токены с тем же именем и входим в них.
+
+    Паттерн наблюдался у D5dtjf: покупает старые токены, когда их "тёзка"
+    начинает pump. Нарратив перетекает → copycat тоже растёт.
+    """
+    name = "sympathy"
+
+    def __init__(self):
+        super().__init__()
+        self.max_positions = SYMPATHY_MAX_POSITIONS
+        self.buy_size_sol  = SYMPATHY_BUY_SIZE_SOL
+        # Реестр токенов: normalized_symbol → [(mint, created_at, TokenEvent)]
+        self._registry: dict[str, list] = defaultdict(list)
+        # Buyer timestamps в sliding window: mint → deque[timestamp]
+        self._buyers: dict[str, deque] = defaultdict(deque)
+        # Mints, для которых мы уже сработали (не повторяем)
+        self._triggered: set[str] = set()
+
+    @staticmethod
+    def _norm(symbol: str) -> str:
+        """Нормализация символа: lowercase, убрать пробелы."""
+        return symbol.lower().strip()
+
+    async def on_create(self, event: "TokenEvent") -> None:
+        """Регистрируем каждый новый токен в реестре по символу."""
+        sym = self._norm(event.symbol)
+        self._registry[sym].append((event.mint, event.created_at, event))
+
+    async def on_trade(self, mint: str, msg: dict) -> None:
+        if msg.get("txType") != "buy":
+            return
+
+        now = time.time()
+        q = self._buyers[mint]
+        q.append(now)
+        # Убираем старые события за пределами окна
+        while q and now - q[0] > SYMPATHY_PUMP_WINDOW_SEC:
+            q.popleft()
+
+        # Порог pump достигнут — ищем copycats
+        if len(q) >= SYMPATHY_PUMP_BUYERS and mint not in self._triggered:
+            # Найти TokenEvent триггера
+            trigger_ev = None
+            for entries in self._registry.values():
+                for m, _, ev in entries:
+                    if m == mint:
+                        trigger_ev = ev
+                        break
+                if trigger_ev:
+                    break
+
+            if trigger_ev:
+                await self._on_pump(trigger_ev)
+            else:
+                # Токен создан до запуска бота — помечаем чтобы не спамить
+                self._triggered.add(mint)
+
+    async def _on_pump(self, trigger_ev: "TokenEvent") -> None:
+        """Триггер pumping → ищем старые copycats с тем же символом."""
+        self._triggered.add(trigger_ev.mint)
+        sym = self._norm(trigger_ev.symbol)
+        candidates = self._registry.get(sym, [])
+
+        entered = 0
+        for mint, created_at, event in candidates:
+            if mint == trigger_ev.mint:
+                continue
+            # Таргет должен быть старше триггера на SYMPATHY_MIN_AGE_DIFF_SEC
+            if created_at > trigger_ev.created_at - SYMPATHY_MIN_AGE_DIFF_SEC:
+                continue
+            if mint in state.positions:
+                continue
+            if mint in self._triggered:
+                continue
+            if not self.can_open():
+                break
+
+            self._triggered.add(mint)
+            log.info("🎭 SYMPATHY  %-10s ← [%s pumping ≥%d buyers/%ds]  %.3f SOL  %s",
+                     event.symbol, trigger_ev.symbol,
+                     SYMPATHY_PUMP_BUYERS, SYMPATHY_PUMP_WINDOW_SEC,
+                     self.buy_size_sol, gmgn(mint))
+
+            pos = await open_position(event, self.buy_size_sol,
+                                      False, 0, self._session)
+            if pos:
+                pos.strategy_name = self.name
+                state.positions[mint] = pos
+                state.mint_open_time[mint] = pos.opened_at
+                self.n_entered += 1
+                entered += 1
+
+        if entered == 0:
+            log.debug("🎭 SYMPATHY: %s pumping — нет старых copycats "
+                      "(sym=%s, в реестре: %d)",
+                      trigger_ev.symbol, sym, len(candidates))
+
+
+# ─── Глобальный runner ────────────────────────────────────────────────────────
+
+_new_token_strat = NewTokenStrategy()
+_sympathy_strat  = SympathyStrategy() if SYMPATHY_ENABLED else None
+
+runner = StrategyRunner()
+runner.register(_new_token_strat)
+if _sympathy_strat:
+    runner.register(_sympathy_strat)
+
 
 # ─── SSL / Keypair ─────────────────────────────────────────────────────────────
 _ssl_ctx = ssl.create_default_context()
@@ -1188,9 +1514,11 @@ async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
     pos = await open_position(event, BUY_SIZE_SOL, is_reentry=False,
                               reentry_count=0, session=session)
     if pos:
+        pos.strategy_name = "new_token"
         state.positions[mint] = pos
         state.mint_open_time[mint] = pos.opened_at   # для 60s окна MOMENTUM_GATE
         state.signals_entered += 1
+        _new_token_strat.n_entered += 1
         if mint not in state.mint_history:
             state.mint_history[mint] = MintHistory()
         state.mint_history[mint].first_seen = event.created_at
@@ -1198,9 +1526,8 @@ async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
 
 async def pumpportal_listener(session: aiohttp.ClientSession):
     """
-    PumpPortal WebSocket:
-    - subscribeNewToken: новые токены → мгновенная покупка
-    - subscribeTokenTrade: торговые события → обновление цен
+    PumpPortal WebSocket — центральный диспетчер событий.
+    Парсит сообщения и рассылает всем стратегиям через runner.
     """
     while True:
         try:
@@ -1211,9 +1538,10 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                 ssl=_ssl_ctx,
                 max_size=2**20,
             ) as ws:
-                # Подписка на новые токены
+                runner.attach(ws, session)
                 await ws.send(json.dumps({"method": "subscribeNewToken"}))
-                log.info("✅ WS подключён: слушаем новые pump.fun токены")
+                log.info("✅ WS подключён: слушаем новые pump.fun токены (%d стратегий активно)",
+                         len(runner.strategies))
 
                 async for raw in ws:
                     try:
@@ -1221,137 +1549,66 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                     except Exception:
                         continue
 
-                    method = msg.get("txType") or msg.get("method") or ""
+                    mint   = msg.get("mint", "")
+                    trader = msg.get("traderPublicKey", "")
+                    if not mint:
+                        continue
 
-                    # ── Новый токен ──────────────────────────────────────────
-                    if msg.get("mint") and "traderPublicKey" in msg:
-                        # Это либо новый токен (creator = traderPublicKey),
-                        # либо трейд на существующий токен
-                        mint   = msg.get("mint", "")
-                        trader = msg.get("traderPublicKey", "")
+                    # ── Новый токен (create event) ──────────────────────────
+                    is_new = (
+                        msg.get("newTokenAccount") is not None
+                        or msg.get("bondingCurveKey") is not None
+                        or msg.get("txType") == "create"
+                    )
 
-                        # Определить: это создание токена или торговля?
-                        is_new = (
-                            msg.get("newTokenAccount") is not None
-                            or msg.get("bondingCurveKey") is not None
-                            or (msg.get("txType") == "create")
+                    if is_new:
+                        ts = msg.get("timestamp")
+                        if ts and ts > 1e12:
+                            ts = ts / 1000
+                        created_at = float(ts) if ts else time.time()
+
+                        vsol = msg.get("vSolInBondingCurve") or msg.get("virtualSolReserves") or 0
+                        if vsol > 1e9:
+                            vsol = vsol / 1e9
+
+                        dev_sol = msg.get("solAmount") or 0
+                        if dev_sol > 1e9:
+                            dev_sol = dev_sol / 1e9
+
+                        vtokens = msg.get("vTokensInBondingCurve") or msg.get("tokenAmount") or 0
+                        is_mayhem = bool(
+                            msg.get("mayhem") or msg.get("isMayhem") or msg.get("is_mayhem")
+                            or (vtokens and float(vtokens) >= MAYHEM_VTOKENS_THRESH)
+                            or (trader == MAYHEM_AI_AGENT_WALLET)
                         )
+                        if is_mayhem:
+                            log.debug("🤖 Mayhem: %s (%s)", msg.get("symbol", "?"), mint[:8])
 
-                        if is_new:
-                            state.signals_received += 1
-                            ts = msg.get("timestamp")
-                            if ts and ts > 1e12:
-                                ts = ts / 1000
-                            created_at = float(ts) if ts else time.time()
+                        n_raw = (msg.get("tokenTransfers") or msg.get("n_transfers")
+                                 or msg.get("transfersAtCreate"))
+                        n_transfers = int(n_raw) if n_raw is not None else -1
 
-                            vsol = msg.get("vSolInBondingCurve") or msg.get("virtualSolReserves") or 0
-                            if vsol > 1e9:
-                                vsol = vsol / 1e9
+                        event = TokenEvent(
+                            mint=mint,
+                            name=msg.get("name", "?"),
+                            symbol=msg.get("symbol", "?")[:10],
+                            creator=trader,
+                            created_at=created_at,
+                            init_sol=float(vsol),
+                            dev_buy_sol=float(dev_sol),
+                            is_mayhem=is_mayhem,
+                            n_transfers=n_transfers,
+                        )
+                        await runner.on_create(event)
 
-                            # solAmount в create-tx = сколько SOL дев вложил при запуске
-                            dev_sol = msg.get("solAmount") or 0
-                            if dev_sol > 1e9:
-                                dev_sol = dev_sol / 1e9
-
-                            # ── Mayhem mode detection ─────────────────────────
-                            # Метод 1: явный флаг от pumpportal (если добавят)
-                            is_mayhem = bool(
-                                msg.get("mayhem")
-                                or msg.get("isMayhem")
-                                or msg.get("is_mayhem")
-                            )
-                            # Метод 2: vTokensInBondingCurve > 1.5B (Mayhem = 2B supply)
-                            vtokens = msg.get("vTokensInBondingCurve") or msg.get("tokenAmount") or 0
-                            if vtokens and float(vtokens) >= MAYHEM_VTOKENS_THRESH:
-                                is_mayhem = True
-                            # Метод 3: создатель = AI-агент кошелёк
-                            if trader == MAYHEM_AI_AGENT_WALLET:
-                                is_mayhem = True
-
-                            if is_mayhem:
-                                log.debug("🤖 Mayhem token: %s (%s)  vtokens=%.0f",
-                                          msg.get("symbol", "?"), mint[:8], float(vtokens or 0))
-
-                            # n_transfers: если PumpPortal передаёт это поле
-                            # n_transfers=1 → WR=27.5% (худший), фильтруем
-                            n_transfers_raw = msg.get("tokenTransfers") or msg.get("n_transfers")
-                            if n_transfers_raw is None:
-                                n_transfers_raw = msg.get("transfersAtCreate")
-                            n_transfers = int(n_transfers_raw) if n_transfers_raw is not None else -1
-
-                            event = TokenEvent(
-                                mint=mint,
-                                name=msg.get("name", "?"),
-                                symbol=msg.get("symbol", "?")[:10],
-                                creator=trader,
-                                created_at=created_at,
-                                init_sol=float(vsol),
-                                dev_buy_sol=float(dev_sol),
-                                is_mayhem=is_mayhem,
-                                n_transfers=n_transfers,
-                            )
-
-                            if PREENTRY_BUYERS_MIN > 0:
-                                # Pre-entry: быстрые фильтры ДО подписки
-                                # (не тратим subscribeTokenTrade на заведомо плохие токены)
-                                _skip = False
-                                if AVOID_HOURS_UTC:
-                                    if datetime.now(timezone.utc).hour in AVOID_HOURS_UTC:
-                                        _skip = True
-                                if not _skip and SKIP_MAYHEM_MODE and is_mayhem:
-                                    _skip = True
-                                if not _skip and SKIP_N_TRANSFERS_1 and n_transfers == 1:
-                                    _skip = True
-                                if _skip:
-                                    state.signals_skipped += 1
-                                    log.debug("⛔ pre-filter %s → пропуск до watching",
-                                              event.symbol)
-                                else:
-                                    # Подписываемся на трейды токена чтобы считать покупателей
-                                    state.watching_tokens[mint] = {
-                                        'event':   event,
-                                        'buyers':  0,
-                                        'started': time.time(),
-                                    }
-                                    await ws.send(json.dumps({
-                                        "method": "subscribeTokenTrade",
-                                        "keys":   [mint],
-                                    }))
-                                    log.debug("👁 watching %s (ждём ≥%d покупателей за %ds)",
-                                              event.symbol, PREENTRY_BUYERS_MIN, PREENTRY_WAIT_SEC)
-                            else:
-                                # Старое поведение: мгновенная покупка (не рекомендуется)
-                                asyncio.ensure_future(_buy_token(event, session))
-
-                        else:
-                            # Торговое событие — обновляем цену + счётчики
-                            sol_amount   = msg.get("solAmount") or msg.get("vSolInBondingCurve") or 0
-                            token_amount = msg.get("tokenAmount") or msg.get("vTokensInBondingCurve") or 0
-                            is_buy       = msg.get("txType") == "buy"
-                            trader       = msg.get("traderPublicKey", "")
-
-                            if sol_amount and token_amount:
-                                update_price_from_trade(mint, sol_amount, token_amount, is_buy)
-
-                            if is_buy:
-                                # ── Pre-entry счётчик ────────────────────────────
-                                if mint in state.watching_tokens:
-                                    w = state.watching_tokens[mint]
-                                    w['buyers'] += 1
-                                    log.debug("👁 %s: %d покупателей (порог %d)",
-                                              w['event'].symbol, w['buyers'], PREENTRY_BUYERS_MIN)
-                                    if w['buyers'] >= PREENTRY_BUYERS_MIN:
-                                        log.info("🔥 %s: %d покупателей за %.0fs → ВХОДИМ!",
-                                                 w['event'].symbol, w['buyers'],
-                                                 time.time() - w['started'])
-                                        asyncio.ensure_future(_buy_token(w['event'], session))
-                                        del state.watching_tokens[mint]
-
-                                # ── MOMENTUM_GATE счётчик (post-buy) ─────────────
-                                if mint in state.positions:
-                                    open_t = state.mint_open_time.get(mint, 0)
-                                    if open_t and (time.time() - open_t) <= MOMENTUM_GATE_SEC:
-                                        state.mint_buy_count[mint] += 1
+                    else:
+                        # ── Торговое событие ────────────────────────────────
+                        sol_amount   = msg.get("solAmount") or msg.get("vSolInBondingCurve") or 0
+                        token_amount = msg.get("tokenAmount") or msg.get("vTokensInBondingCurve") or 0
+                        if sol_amount and token_amount:
+                            update_price_from_trade(mint, sol_amount, token_amount,
+                                                    msg.get("txType") == "buy")
+                        await runner.on_trade(mint, msg)
 
         except websockets.ConnectionClosed:
             log.warning("WS закрыт, переподключение через 3s...")
@@ -1430,22 +1687,11 @@ async def reentry_monitor(session: aiohttp.ClientSession):
             log.debug("reentry_monitor: %s", e)
 
 
-async def watching_cleanup():
-    """Удаляем токены, не набравшие покупателей за PREENTRY_WAIT_SEC секунд."""
+async def strategy_periodic():
+    """Вызываем periodic() на всех стратегиях каждые 5 секунд."""
     while True:
         await asyncio.sleep(5)
-        if not state.watching_tokens:
-            continue
-        now = time.time()
-        expired = [m for m, w in list(state.watching_tokens.items())
-                   if now - w['started'] > PREENTRY_WAIT_SEC]
-        for m in expired:
-            w = state.watching_tokens.pop(m, None)
-            if w:
-                state.signals_expired += 1
-                log.debug("⏰ %s: истёк таймаут %ds (набрал %d/%d покупателей) → пропуск",
-                          w['event'].symbol, PREENTRY_WAIT_SEC,
-                          w['buyers'], PREENTRY_BUYERS_MIN)
+        await runner.periodic()
 
 
 async def status_logger():
@@ -1461,11 +1707,18 @@ async def status_logger():
                  state.bank, len(state.positions), MAX_POSITIONS, len(_price_cache))
         log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d  |  Наблюдаем: %d  |  Истекло: %d",
                  state.signals_received, state.signals_entered, state.signals_skipped,
-                 len(state.watching_tokens), state.signals_expired)
+                 len(_new_token_strat.watching), state.signals_expired)
         log.info("  Фильтры: mayhem=%d  dev_buy=%d  BC_sol=%d  mcap_usd=%d  hours=%d  n_trans1=%d  momentum=%d",
                  state.filtered_mayhem, state.filtered_dev_buy,
                  state.filtered_bc_sol, state.filtered_mcap_usd,
                  state.filtered_hours, state.filtered_n_transfers, state.filtered_momentum)
+        # ── Per-strategy stats ──────────────────────────────────────────────
+        for s in runner.strategies:
+            my_pos = s.my_positions()
+            log.info("  [%s]  позиций: %d/%d  вошёл: %d  PnL: %+.4f SOL%s",
+                     s.name, len(my_pos), s.max_positions,
+                     s.n_entered, s.pnl,
+                     f"  watching={len(s.watching)}" if hasattr(s, 'watching') else "")
         pnl_str = f"{state.session_pnl:+.4f}"
         fee_str = f"  (fees: -{state.session_fees:.4f} SOL)" if DRY_RUN else ""
         log.info("  Сделок: %d  |  Wins: %d  |  WR: %.1f%%  |  PnL: %s SOL%s",
@@ -1699,7 +1952,7 @@ async def main():
             status_logger(),
             daily_reset(),
             autosave_loop(),
-            watching_cleanup(),
+            strategy_periodic(),
         )
 
 
