@@ -179,26 +179,29 @@ MAX_REENTRIES        = int(os.getenv("MAX_REENTRIES", "0"))   # 0 = отключ
 # ── Риск ─────────────────────────────────────────────────────────────────────
 DAILY_LOSS_LIMIT_SOL = float(os.getenv("DAILY_LOSS_LIMIT_SOL", "5.0"))
 
-# ── Фильтры входа (D5dtjf: жёсткая селекция) ─────────────────────────────────
-# Dev buy: 0–0.1 SOL: WR=32%, avg +0.04 SOL  ← зелёная зона
-# Dev buy 0.1–0.5 SOL: WR=14.6% → пропускаем!
-# Dev buy >0.5 SOL: WR=16%, avg -0.006 SOL → пропускаем!
-DEV_BUY_SKIP_MIN_SOL = float(os.getenv("DEV_BUY_SKIP_MIN_SOL", "0.1"))
+# ── Фильтры входа — ВАЖНО: совместимость с PumpPortal полями ────────────────
+#
+# ПРОБЛЕМА: поля vSolInBondingCurve и solAmount из PumpPortal НЕ равны
+# полям first_buy_bc_sol и dev_buy_sol из signal-данных!
+#
+# vSolInBondingCurve при создании = виртуальный резерв pump.fun ≈ 30 SOL (всегда!)
+#   first_buy_bc_sol в данных = реальный SOL в пуле = vSol - ~30 (offset)
+#   → При создании реальный SOL = 0, фильтр по BC не применим на entry
+#
+# solAmount в create-событии = SOL создателя при запуске (если он купил)
+#   dev_buy_sol в данных = тот же смысл, но могут быть расхождения
+#   → Может работать, но нужна валидация
+#
+# РЕКОМЕНДАЦИЯ: BC фильтр на entry НЕ РАБОТАЕТ (vSol=30 SOL всегда > MAX)
+# Выставляем MAX_ENTRY_BC_SOL=0 чтобы отключить
+# Основной фильтр качества = MOMENTUM_GATE (96 buyers в 60s)
+DEV_BUY_SKIP_MIN_SOL = float(os.getenv("DEV_BUY_SKIP_MIN_SOL", "0.0"))  # 0 = выключен
 
-# Bonding Curve SOL при входе (init_sol из PumpPortal CREATE события):
-# ══ ДАННЫЕ nya666: медианный BC при покупке = 11.31 SOL (не 1.86!) ══
-# nya666 golden (nb60=96), N=14,612:
-#   BC  0-2  SOL:  WR=63.0%, AvgPnL=+0.137  N=230  ← отлично (мало сделок)
-#   BC  2-5  SOL:  WR=58.8%, AvgPnL=+0.120  N=1417 ← отлично
-#   BC  5-10 SOL:  WR=51.7%, AvgPnL=+0.100  N=4413 ← хорошо
-#   BC 10-15 SOL:  WR=47.9%, AvgPnL=+0.093  N=4366 ← хорошо
-#   BC 15-20 SOL:  WR=43.3%, AvgPnL=+0.057  N=2951 ← приемлемо
-#   BC 20-30 SOL:  WR=43.0%, AvgPnL=+0.037  N=1210 ← ниже порога
-#   BC 30+   SOL:  WR=24.0%, AvgPnL=-0.001  N=25   ← ОПАСНО
-# Старый MAX=2.5 SOL блокировал 97% сделок nya666! → поднимаем до 20 SOL
-# Combo BC<10+ntr≠1: N=4,510, WR=55.5%, AvgPnL=+0.124 ← лучший набор
-MIN_ENTRY_BC_SOL     = float(os.getenv("MIN_ENTRY_BC_SOL", "0.3"))
-MAX_ENTRY_BC_SOL     = float(os.getenv("MAX_ENTRY_BC_SOL", "20.0"))  # 2.5→20.0!
+# BC SOL фильтр (на основе vSolInBondingCurve):
+# 0.0 = отключён (рекомендуется: vSolInBondingCurve ≠ first_buy_bc_sol из данных)
+# >0  = включить: актуально только если PumpPortal передаёт реальный BC SOL
+MIN_ENTRY_BC_SOL     = float(os.getenv("MIN_ENTRY_BC_SOL", "0.0"))
+MAX_ENTRY_BC_SOL     = float(os.getenv("MAX_ENTRY_BC_SOL", "0.0"))  # 0 = выключен
 
 # ── Фильтр по n_transfers при создании токена ─────────────────────────────────
 # ══ ПОДТВЕРЖДЕНО на nya666 (34,399 сделок) ══
@@ -1116,20 +1119,26 @@ async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
         log.debug("⛔ %s: n_transfers=1 → пропуск [WR=27.5%%]", event.symbol)
         return
 
-    # ── Фильтр по dev buy (D5dtjf данные: ≥0.1 SOL → WR=14.6%) ─────────────
+    # ── Диагностический лог (debug-уровень) для калибровки фильтров ─────────
+    log.debug("🔍 %s: vSol=%.2f dev_buy=%.3f n_tr=%d",
+              event.symbol, event.init_sol, event.dev_buy_sol, event.n_transfers)
+
+    # ── Фильтр по dev buy (solAmount из PumpPortal create-события) ───────────
+    # 0.0 = фильтр отключён (по умолчанию: solAmount ≠ dev_buy_sol из данных)
+    # Включить: DEV_BUY_SKIP_MIN_SOL=0.5 в env если убедились что поле корректно
     dev_sol = event.dev_buy_sol or 0.0
-    if dev_sol >= DEV_BUY_SKIP_MIN_SOL:
+    if DEV_BUY_SKIP_MIN_SOL > 0 and dev_sol >= DEV_BUY_SKIP_MIN_SOL:
         state.signals_skipped += 1
         state.filtered_dev_buy += 1
-        log.debug("⛔ %s: dev_buy=%.3f SOL (≥%.2f) → пропуск [WR=14%%]",
+        log.debug("⛔ %s: dev_buy=%.3f SOL (≥%.2f) → пропуск",
                   event.symbol, dev_sol, DEV_BUY_SKIP_MIN_SOL)
         return
 
-    # ── Фильтр по BC SOL при входе (first_buy_bc_sol = init_sol) ────────────
-    # D5dtjf данные: 1.0–3.0 SOL → WR=30-33%, avg +0.030–0.034 SOL (оптимум)
-    # <1.0 SOL: WR=18-24% (слишком ранний вход, нет ликвидности)
-    # >3.0 SOL: WR=37-49% но avg PnL падает (поздний вход, уже памп)
-    if MIN_ENTRY_BC_SOL > 0 or MAX_ENTRY_BC_SOL < 9999:
+    # ── Фильтр по BC SOL (vSolInBondingCurve) ───────────────────────────────
+    # MAX=0 = отключён (по умолчанию: vSolInBondingCurve ≠ first_buy_bc_sol)
+    # При создании pump.fun vSolInBondingCurve ≈ 30 SOL (виртуальный резерв)
+    # Включить: MAX_ENTRY_BC_SOL=35 в env чтобы отсечь аномальные токены (>35 SOL)
+    if MAX_ENTRY_BC_SOL > 0:
         bc_sol = event.init_sol or 0.0
         if not (MIN_ENTRY_BC_SOL <= bc_sol <= MAX_ENTRY_BC_SOL):
             state.signals_skipped += 1
@@ -1569,9 +1578,12 @@ async def main():
              BUY_SIZE_SOL, MAX_POSITIONS)
     log.info("  Quick stop T+%ds  |  MOMENTUM_GATE T+%ds (need ≥%d buyers)  |  Time stop %d мин",
              QUICK_STOP_SEC, MOMENTUM_GATE_SEC, BUYERS_60S_MIN, HARD_TIME_STOP_MIN)
-    log.info("  Фильтры входа: dev_buy<%.2f  BC=[%.1f–%.1f]SOL  mcap≤$%.0f  avoid_hours=%s  skip_ntrans1=%s",
-             DEV_BUY_SKIP_MIN_SOL, MIN_ENTRY_BC_SOL, MAX_ENTRY_BC_SOL,
+    log.info("  Фильтры входа: dev_buy=%s  BC=%s  mcap≤$%.0f  avoid_hours=%s  skip_ntrans1=%s",
+             f"<{DEV_BUY_SKIP_MIN_SOL}" if DEV_BUY_SKIP_MIN_SOL > 0 else "OFF",
+             f"[{MIN_ENTRY_BC_SOL}–{MAX_ENTRY_BC_SOL}]" if MAX_ENTRY_BC_SOL > 0 else "OFF",
              MAX_ENTRY_MCAP_USD, AVOID_HOURS_UTC or "none", SKIP_N_TRANSFERS_1)
+    log.info("  Основной фильтр: QUICK_STOP T+%ds → MOMENTUM_GATE T+%ds ≥%d buyers",
+             QUICK_STOP_SEC, MOMENTUM_GATE_SEC, BUYERS_60S_MIN)
     log.info("  SL -%.0f%%  TP1 +%.0f%%→%.0f%%  TP2 +%.0f%%→%.0f%%  TP3 +%.0f%%  Trail -%.0f%% от пика",
              SL_PCT*100, TP1_PCT*100, TP1_SELL_FRAC*100,
              TP2_PCT*100, TP2_SELL_FRAC*100,
