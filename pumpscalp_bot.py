@@ -1167,7 +1167,12 @@ async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
     # mcap_usd ≈ init_sol * SOL_PRICE_USD * коэффициент (~37x для pump.fun)
     # Упрощение: используем init_sol как прокси (настраивай SOL_PRICE_USD точно)
     if MAX_ENTRY_MCAP_USD > 0:
-        # Приближение: pump.fun initial mcap ≈ vSol × (1B / 793M) × SOL_PRICE_USD
+        # vSolInBondingCurve включает 30 SOL виртуального резерва pump.fun.
+        # dev_buy_sol = реальный SOL вложенный девом (сверх виртуального).
+        # mcap ≈ (30 + dev_buy_sol) × 1.26 × SOL_PRICE_USD
+        # При dev_buy=0: mcap ≈ 30×1.26×SOL = минимум ~$5,670 при SOL=$150
+        # Фильтр полезен только при высоком dev_buy (>0.5 SOL поднимает mcap выше нормы).
+        # Ставь MAX_ENTRY_MCAP_USD > 5700 (при SOL≈$150) или отключи (=0).
         mcap_usd = event.init_sol * 1.26 * SOL_PRICE_USD if event.init_sol > 0 else 0
         if mcap_usd > MAX_ENTRY_MCAP_USD:
             state.signals_skipped += 1
@@ -1654,10 +1659,17 @@ async def main():
              BUY_SIZE_SOL, MAX_POSITIONS)
     log.info("  Quick stop T+%ds  |  MOMENTUM_GATE T+%ds (need ≥%d buyers)  |  Time stop %d мин",
              QUICK_STOP_SEC, MOMENTUM_GATE_SEC, BUYERS_60S_MIN, HARD_TIME_STOP_MIN)
-    log.info("  Фильтры входа: dev_buy=%s  BC=%s  mcap≤$%.0f  avoid_hours=%s  skip_ntrans1=%s",
+    mcap_str = f"≤${MAX_ENTRY_MCAP_USD:.0f}" if MAX_ENTRY_MCAP_USD > 0 else "OFF"
+    log.info("  Фильтры входа: dev_buy=%s  BC=%s  mcap=%s  avoid_hours=%s  skip_ntrans1=%s",
              f"<{DEV_BUY_SKIP_MIN_SOL}" if DEV_BUY_SKIP_MIN_SOL > 0 else "OFF",
              f"[{MIN_ENTRY_BC_SOL}–{MAX_ENTRY_BC_SOL}]" if MAX_ENTRY_BC_SOL > 0 else "OFF",
-             MAX_ENTRY_MCAP_USD, AVOID_HOURS_UTC or "none", SKIP_N_TRANSFERS_1)
+             mcap_str, AVOID_HOURS_UTC or "none", SKIP_N_TRANSFERS_1)
+    # Предупреждение: mcap фильтр ≤ минимального теоретического mcap → заблокирует все токены
+    _min_mcap = 30 * 1.26 * SOL_PRICE_USD  # vSol=30 виртуальный резерв pump.fun
+    if MAX_ENTRY_MCAP_USD > 0 and MAX_ENTRY_MCAP_USD < _min_mcap:
+        log.warning("⚠️  MAX_ENTRY_MCAP_USD=$%.0f НИЖЕ минимума $%.0f (SOL=$%.0f) → ВСЕ токены будут отфильтрованы! "
+                    "Установи MAX_ENTRY_MCAP_USD=0 чтобы отключить или ≥ $%.0f",
+                    MAX_ENTRY_MCAP_USD, _min_mcap, SOL_PRICE_USD, _min_mcap + 500)
     log.info("  Pre-entry: ждём ≥%d покупателей за %ds → ТОГДА входим (0=мгновенно)",
              PREENTRY_BUYERS_MIN, PREENTRY_WAIT_SEC)
     log.info("  Post-entry: QUICK_STOP T+%ds → MOMENTUM_GATE T+%ds ≥%d buyers",
