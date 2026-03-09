@@ -40,20 +40,22 @@ PUMPSCALP v5.0 — Pump.fun Direct Bonding Curve Sniper
     - TP3 +500%: продаём весь остаток (moonbag)
     - Trailing SL: активируется после +50%, тянется в -12% от пика
 
-  ФИЛЬТРЫ ВХОДА:
-    - dev_buy < 0.1 SOL (не 0.5!) — данные: >0.1 SOL: WR=14.6%
-    - BC SOL 0.3–2.5 SOL при входе (не 1-3! BC 2.5-3.0 уже деградирует)
-      sweet spot = 2.0–2.5 SOL (WR=33.4%, avg PnL=0.045 — лучший глобально)
-    - n_transfers=1 → ПРОПУСК (WR=27.5% глобально, в golden 56.9% vs 63%+)
-    - Часы 7-9 UTC → ПРОПУСК (golden WR падает до 49-51% vs 62-69% в другие часы)
+  ФИЛЬТРЫ ВХОДА (базируются на 56,654 сделках D5dtjf+nya666):
+    - dev_buy < 0.1 SOL — данные D5dtjf: >0.1 SOL WR=14.6%
+    - BC SOL 0.3–20.0 SOL: nya666 медиана=11.31 SOL, golden BC<10 WR=53.8%
+      Не используем старый MAX=2.5 (блокировал 97% nya666 golden сделок!)
+    - n_transfers=1 → ПРОПУСК (nya666: WR=27.8%, golden WR=42.9% — худший!)
+      ntr=4+: nya666 golden WR=55-64%, AvgPnL=0.15-0.28 SOL
+    - Часы: НЕЙТРАЛЬНО (nya666 h7-9 UTC WR=43-47% = такой же как остальные)
     - Mcap в USD ≤ MAX_ENTRY_MCAP_USD (настраивается)
-    - НЕТ DCA: n_buys=1→WR=64.3%; n_buys=2→WR=45.6%; n_buys=3→WR=33%; n_buys=4→WR=20%
-    - НЕТ re-entry (multi-buy сделки: 48.4% крупных убытков)
+    - НЕТ DCA: nya666 n_buys=1→WR=64%, n_buys=2→WR=46%, 3+→WR<34%
+    - НЕТ re-entry (убытки при multi-buy подтверждены обоими кошельками)
 
-  ДОПОЛНИТЕЛЬНЫЕ НАХОДКИ:
-    - NB60=96 — это sentinel "96+", nb60=99-100 слабее (WR≈49% vs 62%)
-    - is_co_buy=True: golden WR=67% vs 59.4%, avg PnL=0.23 vs 0.13 SOL (83% выше!)
-    - BC winners median=2.21 SOL, BC losers median=2.41 SOL → лучше входить ниже
+  MOMENTUM GATE (ГЛАВНЫЙ ФИЛЬТР):
+    - nb60=96 = SENTINEL "96+" в системе (14,612 сделок, WR=49%, AvgPnL=+0.086)
+    - nb60=91-95: РЕАЛЬНЫЕ значения WR=0%!! → мёртвые токены, выходим НЕМЕДЛЕННО
+    - nb60=97-100: WR=33-37%, AvgPnL часто ОТРИЦАТЕЛЬНЫЙ → тоже хуже sentinel
+    - Вывод: держим ТОЛЬКО при nb60=96 (≥96 buyers = cap value)
 
   КОМИССИИ (DRY RUN учитывает реальные расходы):
     - Priority fee: PRIORITY_FEE_MICROLAMPORTS / 1e6 SOL
@@ -147,12 +149,17 @@ TP3_SELL_FRAC        = float(os.getenv("TP3_SELL_FRAC", "1.00"))
 # ── Momentum checkpoints (D5dtjf стратегия) ──────────────────────────────────
 # T+10s QUICK_STOP: если цена не выросла → токен мёртвый
 QUICK_STOP_SEC       = int(os.getenv("QUICK_STOP_SEC", "10"))
-# T+60s MOMENTUM_GATE: КЛЮЧЕВОЙ ФИЛЬТР D5dtjf
-# Нужно ≥91 покупателей в 60-секундном окне (49.6% сделок wallet, +0.065 avg PnL)
-# n_buyers_in_60s < 91 → WR < 37%, avg PnL отрицательный → ВЫХОДИМ
+# T+60s MOMENTUM_GATE: КЛЮЧЕВОЙ ФИЛЬТР
+# ══ КРИТИЧЕСКАЯ НАХОДКА из 34,399 сделок nya666 ══
+# nb60=91-95: РЕАЛЬНЫЕ значения, WR=0%!! → это мертвые токены
+# nb60=96:    SENTINEL "96+" (14,612 сделок) WR=49.0%, AvgPnL=+0.086 SOL ← ЗЕЛЁНАЯ ЗОНА
+# nb60=97:    WR=37.5%, AvgPnL=+0.001 (уже хуже!)
+# nb60=98-99: WR=33-35%, AvgPnL ОТРИЦАТЕЛЬНЫЙ
+# Вывод: порог 91 был НЕПРАВИЛЬНЫМ, нужно 96 (sentinel "96+")
+# D5dtjf подтверждает: nb60=96 = 6,931 сделок vs 51-59 у 91-95
 MOMENTUM_GATE_SEC    = int(os.getenv("MOMENTUM_GATE_SEC", "60"))
-MOMENTUM_MIN_PCT     = float(os.getenv("MOMENTUM_MIN_PCT", "0.0"))   # любой рост OK, важнее buyers
-BUYERS_60S_MIN       = int(os.getenv("BUYERS_60S_MIN", "91"))        # порог: ≥91 покупателей
+MOMENTUM_MIN_PCT     = float(os.getenv("MOMENTUM_MIN_PCT", "0.0"))   # любой рост OK
+BUYERS_60S_MIN       = int(os.getenv("BUYERS_60S_MIN", "96"))        # 91→96 sentinel!
 
 # Trailing: после +50% → SL подтягивается в -12% от пика (D5dtjf тighter exits)
 TRAILING_TRIGGER_PCT = float(os.getenv("TRAILING_TRIGGER_PCT", "0.50"))
@@ -174,32 +181,38 @@ DAILY_LOSS_LIMIT_SOL = float(os.getenv("DAILY_LOSS_LIMIT_SOL", "5.0"))
 # Dev buy >0.5 SOL: WR=16%, avg -0.006 SOL → пропускаем!
 DEV_BUY_SKIP_MIN_SOL = float(os.getenv("DEV_BUY_SKIP_MIN_SOL", "0.1"))
 
-# Bonding Curve SOL при входе (first_buy_bc_sol):
-# Обновлённые данные из детального анализа golden trades:
-# <0.3 SOL:    golden WR=43% (слабо!)
-# 0.3–0.7 SOL: golden WR=62-68%
-# 0.7–2.5 SOL: golden WR=62-65%, avg PnL 0.14–0.21 SOL ← лучший диапазон
-# 2.0–2.5 SOL: глобально лучший (WR=33.4%, avg PnL=0.045) — sweet spot
-# 2.5–3.0 SOL: golden WR резко падает до 59.2%, avg PnL 0.112 (значит хуже)
-# >3.0 SOL:    golden WR=55% (деградация, WR падает на ~10 пунктов)
+# Bonding Curve SOL при входе (init_sol из PumpPortal CREATE события):
+# ══ ДАННЫЕ nya666: медианный BC при покупке = 11.31 SOL (не 1.86!) ══
+# nya666 golden (nb60=96), N=14,612:
+#   BC  0-2  SOL:  WR=63.0%, AvgPnL=+0.137  N=230  ← отлично (мало сделок)
+#   BC  2-5  SOL:  WR=58.8%, AvgPnL=+0.120  N=1417 ← отлично
+#   BC  5-10 SOL:  WR=51.7%, AvgPnL=+0.100  N=4413 ← хорошо
+#   BC 10-15 SOL:  WR=47.9%, AvgPnL=+0.093  N=4366 ← хорошо
+#   BC 15-20 SOL:  WR=43.3%, AvgPnL=+0.057  N=2951 ← приемлемо
+#   BC 20-30 SOL:  WR=43.0%, AvgPnL=+0.037  N=1210 ← ниже порога
+#   BC 30+   SOL:  WR=24.0%, AvgPnL=-0.001  N=25   ← ОПАСНО
+# Старый MAX=2.5 SOL блокировал 97% сделок nya666! → поднимаем до 20 SOL
+# Combo BC<10+ntr≠1: N=4,510, WR=55.5%, AvgPnL=+0.124 ← лучший набор
 MIN_ENTRY_BC_SOL     = float(os.getenv("MIN_ENTRY_BC_SOL", "0.3"))
-MAX_ENTRY_BC_SOL     = float(os.getenv("MAX_ENTRY_BC_SOL", "2.5"))
+MAX_ENTRY_BC_SOL     = float(os.getenv("MAX_ENTRY_BC_SOL", "20.0"))  # 2.5→20.0!
 
 # ── Фильтр по n_transfers при создании токена ─────────────────────────────────
-# Анализ 22,254 сделок: n_transfers=1 — самый плохой бакет:
-#   глобально WR=27.5%, avg PnL=0.003 (хуже всех!)
-#   в golden: WR=56.9% vs 61-64% у остальных (7-8 пунктов потери WR)
-# n_transfers=0 (fresh mint): WR=33.6%, avg +0.039   ← зелёный
-# n_transfers=2: WR=35.4%, avg +0.026                ← зелёный
-# n_transfers=6-10: WR=33.9%, avg +0.078             ← зелёный
-# Если PumpPortal передаёт это поле — фильтруем!
+# ══ ПОДТВЕРЖДЕНО на nya666 (34,399 сделок) ══
+# nya666 ВСЕ:    ntr=1 WR=27.8%, AvgPnL=-0.016 (ХУДШИЙ!)
+#                ntr=2 WR=31.2%, ntr=3 WR=39.4%, ntr=4 WR=42.8%, ntr=11+ WR=58.7%
+# nya666 GOLDEN: ntr=1 WR=42.9%, AvgPnL=+0.028 (ХУДШИЙ в golden!)
+#                ntr=4 WR=55.9%, ntr=5 WR=61.1%! ntr=6-10 WR=53.4%, ntr=11+ WR=64.5%
+# Паттерн: чем больше transfers при создании — тем лучше (более сложные, оригинальные токены)
+# ntr=1: однотипный шаблон, вероятно массовый скам/шаблонный запуск → ПРОПУСКАЕМ
 SKIP_N_TRANSFERS_1   = os.getenv("SKIP_N_TRANSFERS_1", "true").lower() == "true"
 
 # ── Фильтр по времени суток (UTC) ────────────────────────────────────────────
-# Golden trades в 7-9 UTC: WR падает до 49-51% vs 62-69% в лучшие часы
-# Лучшие часы: 17-19 UTC (WR=68-69%), 22-23 UTC (WR=63-66%), 2-4 UTC (WR=63-66%)
-# "" = торгуем круглосуточно; "7,8,9" = исключаем 7, 8, 9 часов UTC
-AVOID_HOURS_UTC      = [int(h) for h in os.getenv("AVOID_HOURS_UTC", "7,8,9").split(",") if h.strip()]
+# ══ ОБНОВЛЕНО по 34,399 сделкам nya666 ══
+# D5dtjf (22,255 сделок): 7-9 UTC слабее (golden WR=49-51% vs 62-69%)
+# nya666 (34,399 сделок): НЕЙТРАЛЬНО — h7=45.1%, h8=47.1%, h9=43.5% (такой же WR!)
+# → Hour filter для nya666 НЕ РАБОТАЕТ, отключаем по умолчанию
+# "" = торгуем круглосуточно (default); "7,8,9" = для D5dtjf-режима
+AVOID_HOURS_UTC      = [int(h) for h in os.getenv("AVOID_HOURS_UTC", "").split(",") if h.strip()]
 
 # ── Фильтр по Market Cap в USD ────────────────────────────────────────────────
 # Позволяет торговать только токены ниже указанного mcap (в долларах).
@@ -1257,8 +1270,8 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                             if sol_amount and token_amount:
                                 update_price_from_trade(mint, sol_amount, token_amount, is_buy)
 
-                            # D5dtjf MOMENTUM_GATE: считаем покупателей в 60s окне
-                            # Нужно ≥BUYERS_60S_MIN (91) уникальных покупок за 60s
+                            # MOMENTUM_GATE: считаем покупателей в 60s окне
+                            # nb60=96 = sentinel "96+" → WR=49%, nb60<96 → WR=0%
                             # Считаем только в пределах 60s от открытия позиции
                             if is_buy and mint in state.positions:
                                 open_t = state.mint_open_time.get(mint, 0)
@@ -1542,8 +1555,8 @@ async def main():
     _load_ml_params()
 
     log.info("═" * 70)
-    log.info("  PUMPSCALP v5.0  —  D5dtjf Strategy (22,254 trades analyzed)")
-    log.info("  Стратегия: первый покупатель + nb60≥%d | EV=+5.0%%/trade | ~229 сделок/день",
+    log.info("  PUMPSCALP v6.0  —  nya666+D5dtjf Strategy (56,654 trades analyzed)")
+    log.info("  Стратегия: первый покупатель + nb60=%d (sentinel) | nb60<96=WR:0%% → немедленный выход",
              BUYERS_60S_MIN)
     log.info("  Режим: %s  |  Банк: %.1f SOL",
              "DRY RUN 🟡 (с комиссиями)" if DRY_RUN else "LIVE 🟢",
