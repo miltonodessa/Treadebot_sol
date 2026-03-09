@@ -146,6 +146,15 @@ TP2_SELL_FRAC        = float(os.getenv("TP2_SELL_FRAC", "0.50"))
 TP3_PCT              = float(os.getenv("TP3_PCT", "5.00"))
 TP3_SELL_FRAC        = float(os.getenv("TP3_SELL_FRAC", "1.00"))
 
+# ── Pre-entry фильтр (ждём покупателей перед входом) ──────────────────────────
+# Проблема: при покупке на newToken-событии WR=1% (мы уже опоздали, SAC≥0)
+# Решение: НЕ покупаем сразу — наблюдаем за токеном, входим только если
+#          за PREENTRY_WAIT_SEC секунд появится ≥PREENTRY_BUYERS_MIN покупателей
+# 0 = старое поведение (мгновенная покупка, не рекомендуется)
+# 5 = входим только в "горячие" токены (≥5 покупателей за 15 секунд)
+PREENTRY_BUYERS_MIN  = int(os.getenv("PREENTRY_BUYERS_MIN", "5"))
+PREENTRY_WAIT_SEC    = int(os.getenv("PREENTRY_WAIT_SEC", "15"))
+
 # ── Momentum checkpoints ───────────────────────────────────────────────────────
 # T+10s QUICK_STOP: если цена не выросла → токен мёртвый
 QUICK_STOP_SEC       = int(os.getenv("QUICK_STOP_SEC", "10"))
@@ -487,10 +496,15 @@ class BotState:
         self.filtered_n_transfers: int = 0  # пропущено из-за n_transfers=1
         self.filtered_momentum:    int = 0  # выходы на MOMENTUM_GATE (<91 buyers)
 
-        # Счётчик buy-событий по минту (для MOMENTUM_GATE: нужно ≥91 buyers за 60s)
+        # Счётчик buy-событий по минту (для MOMENTUM_GATE)
         self.mint_buy_count: dict[str, int] = defaultdict(int)
-        # Время открытия позиции для каждого минта (чтобы считать только в 60s окне)
+        # Время открытия позиции для каждого минта (чтобы считать только в окне)
         self.mint_open_time: dict[str, float] = {}
+
+        # Pre-entry: токены на наблюдении перед входом
+        # mint → {'event': TokenEvent, 'buyers': int, 'started': float}
+        self.watching_tokens: dict[str, dict] = {}
+        self.signals_expired: int = 0   # токены, не набравшие покупателей за PREENTRY_WAIT_SEC
 
         # История сделок для экспорта
         self.trade_log: list[TradeRecord] = []
@@ -1271,10 +1285,27 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                                 is_mayhem=is_mayhem,
                                 n_transfers=n_transfers,
                             )
-                            asyncio.ensure_future(_buy_token(event, session))
+
+                            if PREENTRY_BUYERS_MIN > 0:
+                                # Pre-entry: наблюдаем, не покупаем сразу
+                                # Подписываемся на трейды токена чтобы считать покупателей
+                                state.watching_tokens[mint] = {
+                                    'event':   event,
+                                    'buyers':  0,
+                                    'started': time.time(),
+                                }
+                                await ws.send(json.dumps({
+                                    "method": "subscribeTokenTrade",
+                                    "keys":   [mint],
+                                }))
+                                log.debug("👁 watching %s (ждём ≥%d покупателей за %ds)",
+                                          event.symbol, PREENTRY_BUYERS_MIN, PREENTRY_WAIT_SEC)
+                            else:
+                                # Старое поведение: мгновенная покупка (не рекомендуется)
+                                asyncio.ensure_future(_buy_token(event, session))
 
                         else:
-                            # Торговое событие — обновляем цену + считаем покупателей
+                            # Торговое событие — обновляем цену + счётчики
                             sol_amount   = msg.get("solAmount") or msg.get("vSolInBondingCurve") or 0
                             token_amount = msg.get("tokenAmount") or msg.get("vTokensInBondingCurve") or 0
                             is_buy       = msg.get("txType") == "buy"
@@ -1283,13 +1314,25 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                             if sol_amount and token_amount:
                                 update_price_from_trade(mint, sol_amount, token_amount, is_buy)
 
-                            # MOMENTUM_GATE: считаем покупателей в 60s окне
-                            # nb60=96 = sentinel "96+" → WR=49%, nb60<96 → WR=0%
-                            # Считаем только в пределах 60s от открытия позиции
-                            if is_buy and mint in state.positions:
-                                open_t = state.mint_open_time.get(mint, 0)
-                                if open_t and (time.time() - open_t) <= MOMENTUM_GATE_SEC:
-                                    state.mint_buy_count[mint] += 1
+                            if is_buy:
+                                # ── Pre-entry счётчик ────────────────────────────
+                                if mint in state.watching_tokens:
+                                    w = state.watching_tokens[mint]
+                                    w['buyers'] += 1
+                                    log.debug("👁 %s: %d покупателей (порог %d)",
+                                              w['event'].symbol, w['buyers'], PREENTRY_BUYERS_MIN)
+                                    if w['buyers'] >= PREENTRY_BUYERS_MIN:
+                                        log.info("🔥 %s: %d покупателей за %.0fs → ВХОДИМ!",
+                                                 w['event'].symbol, w['buyers'],
+                                                 time.time() - w['started'])
+                                        asyncio.ensure_future(_buy_token(w['event'], session))
+                                        del state.watching_tokens[mint]
+
+                                # ── MOMENTUM_GATE счётчик (post-buy) ─────────────
+                                if mint in state.positions:
+                                    open_t = state.mint_open_time.get(mint, 0)
+                                    if open_t and (time.time() - open_t) <= MOMENTUM_GATE_SEC:
+                                        state.mint_buy_count[mint] += 1
 
         except websockets.ConnectionClosed:
             log.warning("WS закрыт, переподключение через 3s...")
@@ -1368,6 +1411,24 @@ async def reentry_monitor(session: aiohttp.ClientSession):
             log.debug("reentry_monitor: %s", e)
 
 
+async def watching_cleanup():
+    """Удаляем токены, не набравшие покупателей за PREENTRY_WAIT_SEC секунд."""
+    while True:
+        await asyncio.sleep(5)
+        if not state.watching_tokens:
+            continue
+        now = time.time()
+        expired = [m for m, w in list(state.watching_tokens.items())
+                   if now - w['started'] > PREENTRY_WAIT_SEC]
+        for m in expired:
+            w = state.watching_tokens.pop(m, None)
+            if w:
+                state.signals_expired += 1
+                log.debug("⏰ %s: истёк таймаут %ds (набрал %d/%d покупателей) → пропуск",
+                          w['event'].symbol, PREENTRY_WAIT_SEC,
+                          w['buyers'], PREENTRY_BUYERS_MIN)
+
+
 async def status_logger():
     """Статус каждые 60 секунд."""
     while True:
@@ -1379,8 +1440,9 @@ async def status_logger():
                  "DRY RUN 🟡" if DRY_RUN else "LIVE 🟢")
         log.info("  Банк: %.4f SOL  |  Позиций: %d/%d  |  Цен в кэше: %d",
                  state.bank, len(state.positions), MAX_POSITIONS, len(_price_cache))
-        log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d",
-                 state.signals_received, state.signals_entered, state.signals_skipped)
+        log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d  |  Наблюдаем: %d  |  Истекло: %d",
+                 state.signals_received, state.signals_entered, state.signals_skipped,
+                 len(state.watching_tokens), state.signals_expired)
         log.info("  Фильтры: mayhem=%d  dev_buy=%d  BC_sol=%d  mcap_usd=%d  hours=%d  n_trans1=%d  momentum=%d",
                  state.filtered_mayhem, state.filtered_dev_buy,
                  state.filtered_bc_sol, state.filtered_mcap_usd,
@@ -1582,7 +1644,9 @@ async def main():
              f"<{DEV_BUY_SKIP_MIN_SOL}" if DEV_BUY_SKIP_MIN_SOL > 0 else "OFF",
              f"[{MIN_ENTRY_BC_SOL}–{MAX_ENTRY_BC_SOL}]" if MAX_ENTRY_BC_SOL > 0 else "OFF",
              MAX_ENTRY_MCAP_USD, AVOID_HOURS_UTC or "none", SKIP_N_TRANSFERS_1)
-    log.info("  Основной фильтр: QUICK_STOP T+%ds → MOMENTUM_GATE T+%ds ≥%d buyers",
+    log.info("  Pre-entry: ждём ≥%d покупателей за %ds → ТОГДА входим (0=мгновенно)",
+             PREENTRY_BUYERS_MIN, PREENTRY_WAIT_SEC)
+    log.info("  Post-entry: QUICK_STOP T+%ds → MOMENTUM_GATE T+%ds ≥%d buyers",
              QUICK_STOP_SEC, MOMENTUM_GATE_SEC, BUYERS_60S_MIN)
     log.info("  SL -%.0f%%  TP1 +%.0f%%→%.0f%%  TP2 +%.0f%%→%.0f%%  TP3 +%.0f%%  Trail -%.0f%% от пика",
              SL_PCT*100, TP1_PCT*100, TP1_SELL_FRAC*100,
@@ -1609,6 +1673,7 @@ async def main():
             status_logger(),
             daily_reset(),
             autosave_loop(),
+            watching_cleanup(),
         )
 
 
