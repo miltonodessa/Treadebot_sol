@@ -42,10 +42,18 @@ PUMPSCALP v5.0 — Pump.fun Direct Bonding Curve Sniper
 
   ФИЛЬТРЫ ВХОДА:
     - dev_buy < 0.1 SOL (не 0.5!) — данные: >0.1 SOL: WR=14.6%
-    - BC SOL 1.0–3.0 SOL при входе
+    - BC SOL 0.3–2.5 SOL при входе (не 1-3! BC 2.5-3.0 уже деградирует)
+      sweet spot = 2.0–2.5 SOL (WR=33.4%, avg PnL=0.045 — лучший глобально)
+    - n_transfers=1 → ПРОПУСК (WR=27.5% глобально, в golden 56.9% vs 63%+)
+    - Часы 7-9 UTC → ПРОПУСК (golden WR падает до 49-51% vs 62-69% в другие часы)
     - Mcap в USD ≤ MAX_ENTRY_MCAP_USD (настраивается)
-    - НЕТ DCA — усреднение в убыток только вредит (avg +0.007 vs +0.026 у single-buy)
+    - НЕТ DCA: n_buys=1→WR=64.3%; n_buys=2→WR=45.6%; n_buys=3→WR=33%; n_buys=4→WR=20%
     - НЕТ re-entry (multi-buy сделки: 48.4% крупных убытков)
+
+  ДОПОЛНИТЕЛЬНЫЕ НАХОДКИ:
+    - NB60=96 — это sentinel "96+", nb60=99-100 слабее (WR≈49% vs 62%)
+    - is_co_buy=True: golden WR=67% vs 59.4%, avg PnL=0.23 vs 0.13 SOL (83% выше!)
+    - BC winners median=2.21 SOL, BC losers median=2.41 SOL → лучше входить ниже
 
   КОМИССИИ (DRY RUN учитывает реальные расходы):
     - Priority fee: PRIORITY_FEE_MICROLAMPORTS / 1e6 SOL
@@ -167,11 +175,31 @@ DAILY_LOSS_LIMIT_SOL = float(os.getenv("DAILY_LOSS_LIMIT_SOL", "5.0"))
 DEV_BUY_SKIP_MIN_SOL = float(os.getenv("DEV_BUY_SKIP_MIN_SOL", "0.1"))
 
 # Bonding Curve SOL при входе (first_buy_bc_sol):
-# <1.0 SOL: WR=18-24%, avg PnL 0.002–0.02   ← слабо
-# 1.0–3.0 SOL: WR=30-33%, avg PnL 0.030–0.034 ← оптимум
-# >3.0 SOL: WR=37-49%, avg PnL падает из-за позднего входа
-MIN_ENTRY_BC_SOL     = float(os.getenv("MIN_ENTRY_BC_SOL", "1.0"))
-MAX_ENTRY_BC_SOL     = float(os.getenv("MAX_ENTRY_BC_SOL", "3.0"))
+# Обновлённые данные из детального анализа golden trades:
+# <0.3 SOL:    golden WR=43% (слабо!)
+# 0.3–0.7 SOL: golden WR=62-68%
+# 0.7–2.5 SOL: golden WR=62-65%, avg PnL 0.14–0.21 SOL ← лучший диапазон
+# 2.0–2.5 SOL: глобально лучший (WR=33.4%, avg PnL=0.045) — sweet spot
+# 2.5–3.0 SOL: golden WR резко падает до 59.2%, avg PnL 0.112 (значит хуже)
+# >3.0 SOL:    golden WR=55% (деградация, WR падает на ~10 пунктов)
+MIN_ENTRY_BC_SOL     = float(os.getenv("MIN_ENTRY_BC_SOL", "0.3"))
+MAX_ENTRY_BC_SOL     = float(os.getenv("MAX_ENTRY_BC_SOL", "2.5"))
+
+# ── Фильтр по n_transfers при создании токена ─────────────────────────────────
+# Анализ 22,254 сделок: n_transfers=1 — самый плохой бакет:
+#   глобально WR=27.5%, avg PnL=0.003 (хуже всех!)
+#   в golden: WR=56.9% vs 61-64% у остальных (7-8 пунктов потери WR)
+# n_transfers=0 (fresh mint): WR=33.6%, avg +0.039   ← зелёный
+# n_transfers=2: WR=35.4%, avg +0.026                ← зелёный
+# n_transfers=6-10: WR=33.9%, avg +0.078             ← зелёный
+# Если PumpPortal передаёт это поле — фильтруем!
+SKIP_N_TRANSFERS_1   = os.getenv("SKIP_N_TRANSFERS_1", "true").lower() == "true"
+
+# ── Фильтр по времени суток (UTC) ────────────────────────────────────────────
+# Golden trades в 7-9 UTC: WR падает до 49-51% vs 62-69% в лучшие часы
+# Лучшие часы: 17-19 UTC (WR=68-69%), 22-23 UTC (WR=63-66%), 2-4 UTC (WR=63-66%)
+# "" = торгуем круглосуточно; "7,8,9" = исключаем 7, 8, 9 часов UTC
+AVOID_HOURS_UTC      = [int(h) for h in os.getenv("AVOID_HOURS_UTC", "7,8,9").split(",") if h.strip()]
 
 # ── Фильтр по Market Cap в USD ────────────────────────────────────────────────
 # Позволяет торговать только токены ниже указанного mcap (в долларах).
@@ -332,9 +360,10 @@ class TokenEvent:
     symbol:      str
     creator:     str
     created_at:  float
-    init_sol:    float    # начальная ликвидность SOL в bonding curve (vSolInBondingCurve)
-    dev_buy_sol: float = 0.0   # сколько SOL вложил создатель при запуске (solAmount в create tx)
-    is_mayhem:   bool  = False  # Mayhem mode: AI-агент торгует 24h, 2B supply
+    init_sol:    float    # BC SOL при создании (vSolInBondingCurve)
+    dev_buy_sol: float = 0.0   # SOL вложенный девом при запуске
+    is_mayhem:   bool  = False
+    n_transfers: int   = -1   # кол-во transfer-ов при создании (-1 = неизвестно)
 
 
 @dataclass
@@ -430,11 +459,13 @@ class BotState:
         self.signals_skipped:  int  = 0
 
         # Статистика фильтров
-        self.filtered_mayhem:    int = 0  # пропущено Mayhem mode
-        self.filtered_dev_buy:   int = 0  # пропущено из-за dev buy ≥0.1 SOL
-        self.filtered_bc_sol:    int = 0  # пропущено из-за BC SOL вне 1–3 SOL
-        self.filtered_mcap_usd:  int = 0  # пропущено из-за mcap > лимита USD
-        self.filtered_momentum:  int = 0  # выходы на MOMENTUM_GATE (<91 buyers)
+        self.filtered_mayhem:      int = 0  # пропущено Mayhem mode
+        self.filtered_dev_buy:     int = 0  # пропущено из-за dev buy ≥0.1 SOL
+        self.filtered_bc_sol:      int = 0  # пропущено из-за BC SOL вне диапазона
+        self.filtered_mcap_usd:    int = 0  # пропущено из-за mcap > лимита USD
+        self.filtered_hours:       int = 0  # пропущено из-за нерабочего часа UTC
+        self.filtered_n_transfers: int = 0  # пропущено из-за n_transfers=1
+        self.filtered_momentum:    int = 0  # выходы на MOMENTUM_GATE (<91 buyers)
 
         # Счётчик buy-событий по минту (для MOMENTUM_GATE: нужно ≥91 buyers за 60s)
         self.mint_buy_count: dict[str, int] = defaultdict(int)
@@ -1043,11 +1074,29 @@ async def _buy_token(event: TokenEvent, session: aiohttp.ClientSession):
     if age > MAX_TOKEN_AGE_SEC:
         return
 
+    # ── Фильтр по времени суток UTC ──────────────────────────────────────────
+    # Golden trades 7-9 UTC: WR=49-51% vs 62-69% в хорошие часы → пропускаем
+    if AVOID_HOURS_UTC:
+        current_hour = datetime.now(timezone.utc).hour
+        if current_hour in AVOID_HOURS_UTC:
+            state.signals_skipped += 1
+            state.filtered_hours += 1
+            return
+
     # ── Фильтр Mayhem mode ───────────────────────────────────────────────────
     if SKIP_MAYHEM_MODE and event.is_mayhem:
         state.signals_skipped += 1
         state.filtered_mayhem += 1
         log.debug("⛔ %s: Mayhem mode → пропуск", event.symbol)
+        return
+
+    # ── Фильтр по n_transfers при создании ───────────────────────────────────
+    # n_transfers=1: WR=27.5% (худший бакет!), golden WR=56.9% vs 63%+ у других
+    # n_transfers=0,2,6-10+: нормальные результаты
+    if SKIP_N_TRANSFERS_1 and event.n_transfers == 1:
+        state.signals_skipped += 1
+        state.filtered_n_transfers += 1
+        log.debug("⛔ %s: n_transfers=1 → пропуск [WR=27.5%%]", event.symbol)
         return
 
     # ── Фильтр по dev buy (D5dtjf данные: ≥0.1 SOL → WR=14.6%) ─────────────
@@ -1178,6 +1227,13 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                                 log.debug("🤖 Mayhem token: %s (%s)  vtokens=%.0f",
                                           msg.get("symbol", "?"), mint[:8], float(vtokens or 0))
 
+                            # n_transfers: если PumpPortal передаёт это поле
+                            # n_transfers=1 → WR=27.5% (худший), фильтруем
+                            n_transfers_raw = msg.get("tokenTransfers") or msg.get("n_transfers")
+                            if n_transfers_raw is None:
+                                n_transfers_raw = msg.get("transfersAtCreate")
+                            n_transfers = int(n_transfers_raw) if n_transfers_raw is not None else -1
+
                             event = TokenEvent(
                                 mint=mint,
                                 name=msg.get("name", "?"),
@@ -1187,8 +1243,8 @@ async def pumpportal_listener(session: aiohttp.ClientSession):
                                 init_sol=float(vsol),
                                 dev_buy_sol=float(dev_sol),
                                 is_mayhem=is_mayhem,
+                                n_transfers=n_transfers,
                             )
-                            # Немедленная покупка — nya666 не ждёт, скорость = всё
                             asyncio.ensure_future(_buy_token(event, session))
 
                         else:
@@ -1299,9 +1355,10 @@ async def status_logger():
                  state.bank, len(state.positions), MAX_POSITIONS, len(_price_cache))
         log.info("  Сигналов: %d  |  Входов: %d  |  Пропущено: %d",
                  state.signals_received, state.signals_entered, state.signals_skipped)
-        log.info("  Фильтры: mayhem=%d  dev_buy≥%.2f=%d  BC_sol=%d  mcap_usd=%d  momentum=%d",
-                 state.filtered_mayhem, DEV_BUY_SKIP_MIN_SOL, state.filtered_dev_buy,
-                 state.filtered_bc_sol, state.filtered_mcap_usd, state.filtered_momentum)
+        log.info("  Фильтры: mayhem=%d  dev_buy=%d  BC_sol=%d  mcap_usd=%d  hours=%d  n_trans1=%d  momentum=%d",
+                 state.filtered_mayhem, state.filtered_dev_buy,
+                 state.filtered_bc_sol, state.filtered_mcap_usd,
+                 state.filtered_hours, state.filtered_n_transfers, state.filtered_momentum)
         pnl_str = f"{state.session_pnl:+.4f}"
         fee_str = f"  (fees: -{state.session_fees:.4f} SOL)" if DRY_RUN else ""
         log.info("  Сделок: %d  |  Wins: %d  |  WR: %.1f%%  |  PnL: %s SOL%s",
@@ -1495,9 +1552,9 @@ async def main():
              BUY_SIZE_SOL, MAX_POSITIONS)
     log.info("  Quick stop T+%ds  |  MOMENTUM_GATE T+%ds (need ≥%d buyers)  |  Time stop %d мин",
              QUICK_STOP_SEC, MOMENTUM_GATE_SEC, BUYERS_60S_MIN, HARD_TIME_STOP_MIN)
-    log.info("  Фильтры входа: dev_buy<%.2f SOL  BC=[%.1f–%.1f] SOL  mcap≤$%.0f (SOL=$%.0f)",
+    log.info("  Фильтры входа: dev_buy<%.2f  BC=[%.1f–%.1f]SOL  mcap≤$%.0f  avoid_hours=%s  skip_ntrans1=%s",
              DEV_BUY_SKIP_MIN_SOL, MIN_ENTRY_BC_SOL, MAX_ENTRY_BC_SOL,
-             MAX_ENTRY_MCAP_USD, SOL_PRICE_USD)
+             MAX_ENTRY_MCAP_USD, AVOID_HOURS_UTC or "none", SKIP_N_TRANSFERS_1)
     log.info("  SL -%.0f%%  TP1 +%.0f%%→%.0f%%  TP2 +%.0f%%→%.0f%%  TP3 +%.0f%%  Trail -%.0f%% от пика",
              SL_PCT*100, TP1_PCT*100, TP1_SELL_FRAC*100,
              TP2_PCT*100, TP2_SELL_FRAC*100,
