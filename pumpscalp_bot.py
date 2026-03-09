@@ -245,7 +245,7 @@ PUMPFUN_FEE_PCT      = float(os.getenv("PUMPFUN_FEE_PCT", "0.01"))      # 1% pro
 NETWORK_FEE_SOL      = float(os.getenv("NETWORK_FEE_SOL", "0.000005"))  # ~5000 lamports
 
 # ── Исполнение ────────────────────────────────────────────────────────────────
-PRIORITY_FEE_MICROLAMPORTS = int(os.getenv("PRIORITY_FEE_MICROLAMPORTS", "500000"))
+PRIORITY_FEE_MICROLAMPORTS = int(os.getenv("PRIORITY_FEE_MICROLAMPORTS", "1000"))  # делится на 1e6 → SOL; 1000=0.001 SOL
 SLIPPAGE_BPS         = int(os.getenv("SLIPPAGE_BPS", "1000"))
 
 # ── API ───────────────────────────────────────────────────────────────────────
