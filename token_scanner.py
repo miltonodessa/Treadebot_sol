@@ -3,6 +3,7 @@ token_scanner.py — Real-Time Token Scanner & Signal Coordinator
 ================================================================
 Connects to the pump.fun WebSocket, routes events to:
   • VelocityAnalyzer      (trade events)
+  • SlotAnalyzer          (trade events — slot compression detection)
   • WalletClusterDetector  (on token create — async background)
   • CreatorReputation      (on token create — async background)
 
@@ -22,6 +23,7 @@ import aiohttp
 import websockets
 
 from velocity_analyzer import VelocityAnalyzer, TokenSignals
+from slot_analyzer import SlotAnalyzer
 
 log = logging.getLogger("scanner")
 
@@ -54,10 +56,12 @@ class TokenScanner:
         entry_max_sec: float = 35.0,
         signal_check_interval: float = 0.5,
         reputation_checker=None,    # CreatorReputation | None
+        slot_analyzer: Optional[SlotAnalyzer] = None,
     ):
         self.va            = velocity_analyzer
         self.cd            = cluster_detector
         self.cr            = reputation_checker
+        self.sa            = slot_analyzer or SlotAnalyzer()
         self.on_entry      = on_entry
         self.session       = session
         self.entry_min     = entry_min_sec
@@ -126,6 +130,7 @@ class TokenScanner:
             await self._on_create(ws, msg)
         elif tx_type in ("buy", "sell") and mint:
             self.va.on_trade(mint, msg)
+            self.sa.on_trade(mint, msg)
 
     async def _on_create(self, ws, msg: dict):
         mint       = msg.get("mint", "")
@@ -137,6 +142,7 @@ class TokenScanner:
             return
 
         sig = self.va.on_create(mint, symbol, creator, float(created_at))
+        self.sa.on_create(mint, symbol, float(created_at))
         self.n_created += 1
 
         log.debug("🆕 %s  %s  creator=%s", symbol, mint[:8], creator[:8])
@@ -207,6 +213,7 @@ class TokenScanner:
             try:
                 await self._evaluate_all()
                 self.va.cleanup(max_age_sec=self.entry_max + 5)
+                self.sa.cleanup(max_age_sec=self.entry_max + 5)
             except Exception as exc:
                 log.debug("signal_loop error: %s", exc)
             await asyncio.sleep(self.check_iv)
@@ -228,6 +235,13 @@ class TokenScanner:
                 log.debug("⏰ %s: expired (age=%.0fs) — %s",
                           sig.symbol, age, sig.summary())
                 continue
+
+            # Sync slot compression from SlotAnalyzer into TokenSignals
+            # (SlotAnalyzer is the authoritative source; VelocityAnalyzer
+            #  only uses the coarse 3-wallets-in-2s fallback)
+            sd = self.sa.get(mint)
+            if sd is not None and sd.slot_compression:
+                sig.slot_cluster_ok = True
 
             ok, reason = sig.all_signals_ok()
             if ok:
