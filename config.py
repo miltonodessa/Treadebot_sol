@@ -63,6 +63,50 @@ PROFIT_PARK_SOL = float(os.getenv("PROFIT_PARK_SOL", "5.0"))
 # ── Filters ────────────────────────────────────────────────────────────────────
 TOKEN_BLACKLIST: set[str] = set(os.getenv("TOKEN_BLACKLIST", "").split(",")) - {""}
 
+# ── Coordinated Launch Sniper (main.py) ────────────────────────────────────────
+# Signal 0: Pre-launch funding cluster (Helius API)
+CLUSTER_WINDOW_SEC   = int(os.getenv("CLUSTER_WINDOW_SEC",   "120"))   # look-back window
+CLUSTER_MIN_WALLETS  = int(os.getenv("CLUSTER_MIN_WALLETS",  "3"))     # min funded wallets
+CLUSTER_MIN_SOL      = float(os.getenv("CLUSTER_MIN_SOL",    "0.10"))  # ignore < 0.1 SOL transfers
+CLUSTER_MAX_SOL      = float(os.getenv("CLUSTER_MAX_SOL",    "1.50"))  # ignore > 1.5 SOL transfers
+
+# Entry window
+ENTRY_MIN_SEC        = float(os.getenv("ENTRY_MIN_SEC",       "12"))
+ENTRY_MAX_SEC        = float(os.getenv("ENTRY_MAX_SEC",       "35"))
+
+# Signal 1: Slot clustering
+SLOT_CLUSTER_MIN     = int(os.getenv("SLOT_CLUSTER_MIN",      "3"))    # wallets in first 2 seconds
+
+# Signal 2: Liquidity velocity
+VELOCITY_MIN_SOL     = float(os.getenv("VELOCITY_MIN_SOL",    "1.0"))  # minimum buy vol
+VELOCITY_STRONG_SOL  = float(os.getenv("VELOCITY_STRONG_SOL", "3.0"))  # strong signal
+
+# Signal 3: Sell pressure
+SELL_PRESSURE_MAX    = float(os.getenv("SELL_PRESSURE_MAX",   "0.35"))  # < 35%
+SELL_PRESSURE_EMRG   = float(os.getenv("SELL_PRESSURE_EMRG",  "0.60"))  # emergency exit > 60%
+
+# Signal 4: Unique buyers
+BUYERS_MIN           = int(os.getenv("BUYERS_MIN",             "10"))   # ≥ 10
+
+# Signal 5: Sell absorption — price drop threshold (20% → reject)
+PRICE_DROP_REJECT    = float(os.getenv("PRICE_DROP_REJECT",   "0.20"))
+
+# Trade
+BUY_SIZE_SOL_SNIPER  = float(os.getenv("BUY_SIZE_SOL",        "0.10"))
+SLIPPAGE_PCT_SNIPER  = float(os.getenv("SLIPPAGE_PCT",         "25.0"))  # %
+PRIORITY_FEE_SNIPER  = float(os.getenv("PRIORITY_FEE_SOL",    "0.0001"))
+
+# Risk
+TP1_PCT_SNIPER       = float(os.getenv("TP1_PCT",              "0.40"))   # +40%
+TP2_PCT_SNIPER       = float(os.getenv("TP2_PCT",              "0.80"))   # +80%
+TP3_PCT_SNIPER       = float(os.getenv("TP3_PCT",              "1.20"))   # +120%
+TP1_FRAC_SNIPER      = float(os.getenv("TP1_FRAC",             "0.40"))   # sell 40% at TP1
+TP2_FRAC_SNIPER      = float(os.getenv("TP2_FRAC",             "0.35"))   # sell 35% at TP2
+TP3_FRAC_SNIPER      = float(os.getenv("TP3_FRAC",             "1.00"))   # sell all at TP3
+SL_PCT_SNIPER        = float(os.getenv("SL_PCT",               "0.25"))   # -25%
+MAX_POSITIONS_SNIPER = int(os.getenv("MAX_POSITIONS",           "5"))
+MAX_HOLD_SNIPER      = int(os.getenv("MAX_HOLD_SEC",            "1800"))   # 30 min
+
 # Старые wallets dict для обратной совместимости с bot.py
 TARGET_WALLETS = {
     "2TE2F3CJDbDhN3MgqNmnUh1NR5nHSornaK5daq65Lejs": {
