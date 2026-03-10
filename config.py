@@ -86,7 +86,7 @@ SELL_PRESSURE_MAX    = float(os.getenv("SELL_PRESSURE_MAX",   "0.35"))  # < 35%
 SELL_PRESSURE_EMRG   = float(os.getenv("SELL_PRESSURE_EMRG",  "0.60"))  # emergency exit > 60%
 
 # Signal 4: Unique buyers
-BUYERS_MIN           = int(os.getenv("BUYERS_MIN",             "10"))   # ≥ 10
+BUYERS_MIN           = int(os.getenv("BUYERS_MIN",             "5"))    # ≥ 5
 
 # Signal 5: Sell absorption — price drop threshold (20% → reject)
 PRICE_DROP_REJECT    = float(os.getenv("PRICE_DROP_REJECT",   "0.20"))

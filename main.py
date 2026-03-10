@@ -61,7 +61,7 @@ CLUSTER_MIN_SOL  = float(os.getenv("CLUSTER_MIN_SOL",  "0.10"))
 CLUSTER_MAX_SOL  = float(os.getenv("CLUSTER_MAX_SOL",  "1.50"))
 VELOCITY_MIN     = float(os.getenv("VELOCITY_MIN_SOL", "1.0"))
 SELL_P_MAX       = float(os.getenv("SELL_PRESSURE_MAX","0.35"))
-BUYERS_MIN       = int(os.getenv("BUYERS_MIN",         "10"))
+BUYERS_MIN       = int(os.getenv("BUYERS_MIN",         "5"))
 SLOT_CLUSTER_MIN = int(os.getenv("SLOT_CLUSTER_MIN",   "3"))
 
 # Trade

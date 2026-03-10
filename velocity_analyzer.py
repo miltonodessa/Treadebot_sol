@@ -95,7 +95,7 @@ class TokenSignals:
 
     @property
     def unique_buyers_ok(self) -> bool:
-        return self.unique_buyers >= 10
+        return self.unique_buyers >= 5
 
     @property
     def sell_absorption_ok(self) -> bool:
@@ -123,7 +123,7 @@ class TokenSignals:
             (self.slot_cluster_ok,     "no_slot_bundle"),
             (self.velocity_ok,         f"low_velocity_{self.buy_vol_sol:.2f}SOL"),
             (self.sell_pressure_ok,    f"sell_pressure_{self.sell_pressure:.0%}"),
-            (self.unique_buyers_ok,    f"only_{self.unique_buyers}_buyers"),
+            (self.unique_buyers_ok,    f"only_{self.unique_buyers}_buyers_need_5"),
             (self.sell_absorption_ok,  "price_drop_rejected"),
             (self.entry_window_ok,     f"outside_window_{self.age_sec:.0f}s"),
         ]
