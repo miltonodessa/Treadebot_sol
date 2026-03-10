@@ -85,11 +85,12 @@ STATUS_INTERVAL  = int(os.getenv("STATUS_INTERVAL",    "60"))    # seconds
 
 # ── Imports (after env loaded) ────────────────────────────────────────────────
 
-from velocity_analyzer      import VelocityAnalyzer, TokenSignals
+from velocity_analyzer       import VelocityAnalyzer, TokenSignals
 from wallet_cluster_detector import WalletClusterDetector
-from token_scanner          import TokenScanner
-from trade_engine           import TradeEngine
-from risk_manager           import RiskManager
+from creator_reputation      import CreatorReputation
+from token_scanner           import TokenScanner
+from trade_engine            import TradeEngine
+from risk_manager            import RiskManager
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +113,7 @@ class SniperBot:
         self.session: Optional[aiohttp.ClientSession] = None
         self.va:      Optional[VelocityAnalyzer]      = None
         self.cd:      Optional[WalletClusterDetector] = None
+        self.cr:      Optional[CreatorReputation]     = None
         self.te:      Optional[TradeEngine]            = None
         self.rm:      Optional[RiskManager]            = None
         self.scanner: Optional[TokenScanner]           = None
@@ -139,9 +141,20 @@ class SniperBot:
             log.info("✅ WalletClusterDetector enabled")
         else:
             log.warning(
-                "⚠️  HELIUS_API_KEY not set — cluster detection disabled. "
-                "Signal 0 will be auto-approved."
+                "⚠️  HELIUS_API_KEY not set — cluster + reputation disabled. "
+                "Signals 0 and 4 will be auto-approved."
             )
+
+        # Creator reputation checker (same Helius key)
+        if HELIUS_API_KEY:
+            self.cr = CreatorReputation(
+                api_key=HELIUS_API_KEY,
+                session=self.session,
+                min_launches=int(os.getenv("REPUTATION_MIN_LAUNCHES", "5")),
+                min_survival_rate=float(os.getenv("REPUTATION_MIN_SURVIVAL", "0.10")),
+                survival_mcap_usd=float(os.getenv("REPUTATION_SURVIVAL_MCAP", "5000")),
+            )
+            log.info("✅ CreatorReputation enabled")
 
         # Trade engine
         self.te = TradeEngine(
@@ -177,6 +190,7 @@ class SniperBot:
             session=self.session,
             entry_min_sec=ENTRY_MIN_SEC,
             entry_max_sec=ENTRY_MAX_SEC,
+            reputation_checker=self.cr,
         )
 
     async def run(self):

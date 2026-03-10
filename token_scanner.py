@@ -2,11 +2,12 @@
 token_scanner.py — Real-Time Token Scanner & Signal Coordinator
 ================================================================
 Connects to the pump.fun WebSocket, routes events to:
-  • VelocityAnalyzer  (trade events)
-  • WalletClusterDetector (on token create — async background)
+  • VelocityAnalyzer      (trade events)
+  • WalletClusterDetector  (on token create — async background)
+  • CreatorReputation      (on token create — async background)
 
 Signal evaluation loop runs every 500ms and fires on_entry_signal()
-when ALL 6 conditions are met within the 12–35s entry window.
+when ALL conditions are met within the 12–35s entry window.
 """
 from __future__ import annotations
 
@@ -52,9 +53,11 @@ class TokenScanner:
         entry_min_sec: float = 12.0,
         entry_max_sec: float = 35.0,
         signal_check_interval: float = 0.5,
+        reputation_checker=None,    # CreatorReputation | None
     ):
         self.va            = velocity_analyzer
         self.cd            = cluster_detector
+        self.cr            = reputation_checker
         self.on_entry      = on_entry
         self.session       = session
         self.entry_min     = entry_min_sec
@@ -153,8 +156,13 @@ class TokenScanner:
         if self.cd:
             asyncio.ensure_future(self._cluster_task(sig))
         else:
-            # No Helius key — skip cluster signal requirement
-            sig.cluster_ok = True
+            sig.cluster_ok = True   # no Helius key → skip
+
+        # Background: creator reputation check
+        if self.cr:
+            asyncio.ensure_future(self._reputation_task(sig))
+        else:
+            sig.reputation_ok = True  # disabled → skip
 
     async def _cluster_task(self, sig: TokenSignals):
         """Run WalletClusterDetector asynchronously for one token."""
@@ -169,6 +177,22 @@ class TokenScanner:
         except Exception as exc:
             log.debug("cluster_task error [%s]: %s", sig.symbol, exc)
             sig.cluster_ok = False  # safe default
+
+    async def _reputation_task(self, sig: TokenSignals):
+        """Run CreatorReputation check asynchronously for one token."""
+        try:
+            result = await self.cr.check(creator=sig.creator)
+            sig.reputation_ok     = result.is_reputable
+            sig.reputation_reason = result.reason
+            if not result.is_reputable:
+                log.info(
+                    "🚫 Creator blocked: %s — %s (%d launches, %d survived)",
+                    sig.symbol, result.reason,
+                    result.total_launches, result.survivors,
+                )
+        except Exception as exc:
+            log.debug("reputation_task error [%s]: %s", sig.symbol, exc)
+            sig.reputation_ok = True  # error → allow (safe default)
 
     # ── Signal evaluation loop ────────────────────────────────────────────
 

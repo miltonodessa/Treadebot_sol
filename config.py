@@ -88,6 +88,11 @@ SELL_PRESSURE_EMRG   = float(os.getenv("SELL_PRESSURE_EMRG",  "0.60"))  # emerge
 # Signal 4: Unique buyers
 BUYERS_MIN           = int(os.getenv("BUYERS_MIN",             "5"))    # ≥ 5
 
+# Signal 4b: Creator Wallet Reputation
+REPUTATION_MIN_LAUNCHES  = int(os.getenv("REPUTATION_MIN_LAUNCHES",  "5"))     # ignore new wallets with < 5 launches
+REPUTATION_MIN_SURVIVAL  = float(os.getenv("REPUTATION_MIN_SURVIVAL", "0.10")) # < 10% survived → reject
+REPUTATION_SURVIVAL_MCAP = float(os.getenv("REPUTATION_SURVIVAL_MCAP","5000")) # USD mcap to count as "survived"
+
 # Signal 5: Sell absorption — price drop threshold (20% → reject)
 PRICE_DROP_REJECT    = float(os.getenv("PRICE_DROP_REJECT",   "0.20"))
 

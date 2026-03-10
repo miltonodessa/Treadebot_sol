@@ -34,6 +34,10 @@ class TokenSignals:
     # ── Signal 0: Pre-launch cluster (заполняется WalletClusterDetector) ──
     cluster_ok: bool = False
 
+    # ── Signal 4: Creator reputation (заполняется CreatorReputation) ──────
+    reputation_ok:     bool = True   # True пока не проверено (benefit of doubt)
+    reputation_reason: str  = "pending"
+
     # ── Signal 1: Slot clustering (первые 2 секунды) ──────────────────────
     early_buys: list = field(default_factory=list)   # [(ts, wallet)]
     slot_cluster_ok: bool = False
@@ -120,6 +124,7 @@ class TokenSignals:
         """
         checks = [
             (self.cluster_ok,          "no_funding_cluster"),
+            (self.reputation_ok,       f"bad_creator_{self.reputation_reason}"),
             (self.slot_cluster_ok,     "no_slot_bundle"),
             (self.velocity_ok,         f"low_velocity_{self.buy_vol_sol:.2f}SOL"),
             (self.sell_pressure_ok,    f"sell_pressure_{self.sell_pressure:.0%}"),
